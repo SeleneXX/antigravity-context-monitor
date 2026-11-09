@@ -1,0 +1,18 @@
+{
+  "name": "context-monitor",
+  "displayName": "Context Monitor",
+  "version": "1.0.0",
+  "description": "实时监控当前会话的上下文 Token 消耗、缓存命中率 (Cache Hit %)、Turns 与 Steps，并在侧边栏提供可视化看板。",
+  "logo": "assets/logo.svg",
+  "author": {
+    "name": "Selene",
+    "url": "https://github.com/SeleneXX"
+  },
+  "homepage": "https://github.com/SeleneXX/antigravity-context-monitor",
+  "repository": "https://github.com/SeleneXX/antigravity-context-monitor",
+  "suggestedPrompts": [
+    "当前会话消耗了多少上下文？",
+    "查看当前的 Cache 命中率和 Token 使用量",
+    "打开上下文监控侧边栏"
+  ]
+}
