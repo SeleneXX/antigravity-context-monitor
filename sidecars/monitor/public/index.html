@@ -1259,7 +1259,6 @@
         if (catFree) catFree.innerText = `${formatNumber(b.freeSpace)} (${freePct}%)`;
 
         // Render 200 dots (each dot is 0.5% = max / 200)
-        const dotVal = max / 200;
         const dotsUser = Math.round(b.userMessages / dotVal);
         const dotsAgent = Math.round(b.agentResponses / dotVal);
         const dotsTools = Math.round(b.toolCalls / dotVal);
