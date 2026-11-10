@@ -570,94 +570,96 @@ for (const [id, meta] of subagentsMap.entries()) {
       }
 
       let status = 'DONE';
-      if (descriptorState === 'SUBAGENT_STATE_KILLED') {
-        status = 'STOPPED';
-      } else {
-        const firstItem = subLines.length > 0 ? JSON.parse(subLines[0]) : {};
-        const lastItem = subLines.length > 0 ? JSON.parse(subLines[subLines.length - 1]) : {};
-        const subSpawnTime = firstItem.created_at ? new Date(firstItem.created_at).getTime() : subStat.birthtimeMs;
-        const subLastActiveTime = lastItem.created_at ? new Date(lastItem.created_at).getTime() : subStat.mtimeMs;
-        const inactiveDuration = Math.max(0, Date.now() - subLastActiveTime);
-        const modifiedRecently = inactiveDuration < 180000;
+      const firstItem = subLines.length > 0 ? JSON.parse(subLines[0]) : {};
+      const lastItem = subLines.length > 0 ? JSON.parse(subLines[subLines.length - 1]) : {};
+      const subSpawnTime = firstItem.created_at ? new Date(firstItem.created_at).getTime() : subStat.birthtimeMs;
+      const subLastActiveTime = lastItem.created_at ? new Date(lastItem.created_at).getTime() : subStat.mtimeMs;
+      const inactiveDuration = Math.max(0, Date.now() - subLastActiveTime);
 
-        let subSendMessageTime = 0;
-        let subLastReceivedTime = 0;
-        for (let j = subLines.length - 1; j >= 0; j--) {
+      let subSendMessageTime = 0;
+      let subLastReceivedTime = 0;
+      for (let j = subLines.length - 1; j >= 0; j--) {
+        try {
+          const it = JSON.parse(subLines[j]);
+          if (!subSendMessageTime && it.tool_calls && it.tool_calls.some(tc => tc.name === 'send_message')) {
+            if (it.created_at) subSendMessageTime = new Date(it.created_at).getTime();
+          }
+          if (!subLastReceivedTime && it.type === 'SYSTEM_MESSAGE' && it.content && it.content.includes(`sender=${active.id}`)) {
+            if (it.created_at) subLastReceivedTime = new Date(it.created_at).getTime();
+          }
+          if (subSendMessageTime && subLastReceivedTime) break;
+        } catch(e){}
+      }
+
+      let parentKillTime = 0;
+      let parentDispatchTime = subSpawnTime;
+      let parentReplyTime = 0;
+
+      try {
+        const mainLines = fs.readFileSync(active.path, 'utf8').trim().split('\n');
+        for (const ml of mainLines) {
           try {
-            const it = JSON.parse(subLines[j]);
-            if (!subSendMessageTime && it.tool_calls && it.tool_calls.some(tc => tc.name === 'send_message')) {
-              if (it.created_at) subSendMessageTime = new Date(it.created_at).getTime();
+            const item = JSON.parse(ml);
+            const t = item.created_at ? new Date(item.created_at).getTime() : 0;
+            if (item.tool_calls) {
+              for (const tc of item.tool_calls) {
+                if (tc.name === 'manage_subagents') {
+                  const args = typeof tc.args === 'string' ? JSON.parse(tc.args) : tc.args;
+                  const action = (args.Action || args.action || '').toLowerCase();
+                  if (action === 'kill_all') {
+                    if (t > parentKillTime) parentKillTime = t;
+                  } else if (action === 'kill') {
+                    const idsStr = JSON.stringify(args.ConversationIds || args.conversationIds || args.ConversationId || args.conversationId || '');
+                    if (idsStr.includes(id)) {
+                      if (t > parentKillTime) parentKillTime = t;
+                    }
+                  }
+                }
+                if (tc.name === 'send_message') {
+                  const args = typeof tc.args === 'string' ? JSON.parse(tc.args) : tc.args;
+                  const rec = String(args.Recipient || args.recipient || '').replace(/^["']|["']$/g, '').trim();
+                  if (rec === id || rec.includes(id)) {
+                    if (t > parentDispatchTime) parentDispatchTime = t;
+                  }
+                }
+              }
             }
-            if (!subLastReceivedTime && it.type === 'SYSTEM_MESSAGE' && it.content && it.content.includes(`sender=${active.id}`)) {
-              if (it.created_at) subLastReceivedTime = new Date(it.created_at).getTime();
+            if (item.content && typeof item.content === 'string') {
+              if (item.content.includes('sender=' + id)) {
+                if (t > parentReplyTime) parentReplyTime = t;
+              }
+              if (item.content.includes('All your subagents and background tasks have been stopped')) {
+                if (t > parentKillTime) parentKillTime = t;
+              }
             }
-            if (subSendMessageTime && subLastReceivedTime) break;
           } catch(e){}
         }
+      } catch(e){}
 
-        let parentKillTime = 0;
-        let parentDispatchTime = subSpawnTime;
-        let parentReplyTime = 0;
+      const hasPendingWork = (parentDispatchTime > parentReplyTime && parentReplyTime > 0) ||
+                            (subLastReceivedTime > subSendMessageTime && subSendMessageTime > 0);
 
-        try {
-          const mainLines = fs.readFileSync(active.path, 'utf8').trim().split('\n');
-          for (const ml of mainLines) {
-            try {
-              const item = JSON.parse(ml);
-              const t = item.created_at ? new Date(item.created_at).getTime() : 0;
-              if (item.tool_calls) {
-                for (const tc of item.tool_calls) {
-                  if (tc.name === 'manage_subagents') {
-                    const args = typeof tc.args === 'string' ? JSON.parse(tc.args) : tc.args;
-                    const action = (args.Action || args.action || '').toLowerCase();
-                    if (action === 'kill_all') {
-                      if (t > parentKillTime) parentKillTime = t;
-                    } else if (action === 'kill') {
-                      const idsStr = JSON.stringify(args.ConversationIds || args.conversationIds || args.ConversationId || args.conversationId || '');
-                      if (idsStr.includes(id)) {
-                        if (t > parentKillTime) parentKillTime = t;
-                      }
-                    }
-                  }
-                  if (tc.name === 'send_message') {
-                    const args = typeof tc.args === 'string' ? JSON.parse(tc.args) : tc.args;
-                    const rec = String(args.Recipient || args.recipient || '').replace(/^["']|["']$/g, '').trim();
-                    if (rec === id || rec.includes(id)) {
-                      if (t > parentDispatchTime) parentDispatchTime = t;
-                    }
-                  }
-                }
-              }
-              if (item.content && typeof item.content === 'string') {
-                if (item.content.includes('sender=' + id)) {
-                  if (t > parentReplyTime) parentReplyTime = t;
-                }
-                if (item.content.includes('All your subagents and background tasks have been stopped')) {
-                  if (t > parentKillTime) parentKillTime = t;
-                }
-              }
-            } catch(e){}
-          }
-        } catch(e){}
+      const hasActiveTools = Boolean(lastItem.tool_calls && lastItem.tool_calls.length > 0);
+      const isGeneric = lastItem.type === 'GENERIC';
+      const isPlanner = lastItem.type === 'PLANNER_RESPONSE';
 
-        const hasPendingWork = (parentDispatchTime > parentReplyTime && parentReplyTime > 0) ||
-                              (subLastReceivedTime > subSendMessageTime && subSendMessageTime > 0);
-
-        if (parentKillTime >= subSpawnTime && subLastActiveTime <= parentKillTime + 5000 && parentDispatchTime <= parentKillTime) {
-          status = 'STOPPED';
-        } else if (hasPendingWork || (subHasSentMessage && subLastActiveTime > subSendMessageTime + 2000 && modifiedRecently)) {
-          status = inactiveDuration < 300000 ? 'RUNNING' : 'STOPPED';
-        } else if (subHasSentMessage && !hasPendingWork && subLastActiveTime <= subSendMessageTime + 2000) {
-          status = 'DONE';
-        } else if (subHasSentMessage) {
-          status = 'DONE';
-        } else if (modifiedRecently) {
-          status = 'RUNNING';
-        } else if ((lastItem.type === 'GENERIC' || lastItem.type === 'PLANNER_RESPONSE') && inactiveDuration < 300000) {
-          status = 'RUNNING';
-        } else {
-          status = 'STOPPED';
-        }
+      // 1. Active execution check (tool calls executing or model decoding next turn)
+      if ((hasActiveTools && inactiveDuration < 180000) || (isGeneric && inactiveDuration < 120000)) {
+        status = 'RUNNING';
+      } else if (hasPendingWork && inactiveDuration < 120000) {
+        status = 'RUNNING';
+      } else if ((subHasSentMessage || parentReplyTime > 0) && !hasPendingWork) {
+        status = 'DONE';
+      } else if (descriptorState === 'SUBAGENT_STATE_KILLED') {
+        status = 'STOPPED';
+      } else if (parentKillTime >= subSpawnTime && parentDispatchTime <= parentKillTime) {
+        status = 'STOPPED';
+      } else if (isPlanner && !hasActiveTools) {
+        status = inactiveDuration >= 10000 ? 'DONE' : 'RUNNING';
+      } else if (inactiveDuration < 30000) {
+        status = 'RUNNING';
+      } else {
+        status = 'STOPPED';
       }
 
       const resolved = resolveSubagentMetadata(id, active.id, meta);

@@ -540,13 +540,14 @@ function getSubagentLiveStatus(mainConvId, subId, mainLogPath, subLogPath, meta 
     const subStat = fs.statSync(subLogPath);
     const now = Date.now();
 
-    // 1. Authoritative descriptor check (.system_generated/subagents/<subId>.json)
+    // 1. Check descriptor (.system_generated/subagents/<subId>.json)
+    let descriptorKilled = false;
     const subDescDir = path.join(BRAIN_DIR, mainConvId, '.system_generated', 'subagents');
     const subDescFile = path.join(subDescDir, `${subId}.json`);
     if (fs.existsSync(subDescFile)) {
       try {
         const subData = JSON.parse(fs.readFileSync(subDescFile, 'utf8'));
-        if (subData.state === 'SUBAGENT_STATE_KILLED') return 'STOPPED';
+        if (subData.state === 'SUBAGENT_STATE_KILLED') descriptorKilled = true;
       } catch (e) {}
     }
 
@@ -638,39 +639,43 @@ function getSubagentLiveStatus(mainConvId, subId, mainLogPath, subLogPath, meta 
       } catch (e) {}
     }
 
-    // Follow-up work dispatch check:
-    // Either parent dispatched after subagent replied, OR subagent received message from parent after sending reply
     const hasPendingWork = (parentDispatchTime > parentReplyTime && parentReplyTime > 0) ||
                           (subLastReceivedTime > subSendMessageTime && subSendMessageTime > 0);
 
-    // Kill check: Kill happened AFTER spawn, and subagent has stopped logging
-    if (parentKillTime >= subSpawnTime && subLastActiveTime <= parentKillTime + 5000 && parentDispatchTime <= parentKillTime) {
+    const hasActiveTools = Boolean(lastItem.tool_calls && lastItem.tool_calls.length > 0);
+    const isGeneric = lastItem.type === 'GENERIC';
+    const isPlanner = lastItem.type === 'PLANNER_RESPONSE';
+
+    // 5. Active execution check (tool calls executing or model decoding next turn)
+    if ((hasActiveTools && inactiveDuration < 180000) || (isGeneric && inactiveDuration < 120000)) {
+      return 'RUNNING';
+    }
+
+    // If parent dispatched follow-up work and subagent is actively working
+    if (hasPendingWork && inactiveDuration < 120000) {
+      return 'RUNNING';
+    }
+
+    // 6. Instant completion check: message delivered back or parent confirmed receipt
+    if ((subHasSentMessage || parentReceivedReply) && !hasPendingWork) {
+      return 'DONE';
+    }
+
+    // 7. Explicit termination check (killed while still working)
+    if (descriptorKilled) {
+      return 'STOPPED';
+    }
+    if (parentKillTime >= subSpawnTime && parentDispatchTime <= parentKillTime) {
       return 'STOPPED';
     }
 
-    // If subagent received follow-up work or has continued activity after sending message:
-    if (hasPendingWork || (subHasSentMessage && subLastActiveTime > subSendMessageTime + 2000 && modifiedRecently)) {
-      return inactiveDuration < 300000 ? 'RUNNING' : 'STOPPED';
+    // 8. Turn finished with no further tool calls
+    if (isPlanner && !hasActiveTools) {
+      return inactiveDuration >= 10000 ? 'DONE' : 'RUNNING';
     }
 
-    // Completed work: If subagent sent its reply, has no pending work, and no subsequent activity
-    if (subHasSentMessage && !hasPendingWork && subLastActiveTime <= subSendMessageTime + 2000) {
-      return 'DONE';
-    }
-
-    if (hasPendingWork) {
-      return inactiveDuration < 300000 ? 'RUNNING' : 'STOPPED';
-    }
-
-    if (subHasSentMessage) {
-      return 'DONE';
-    }
-
-    // Still working on initial dispatch:
-    if (modifiedRecently) {
-      return 'RUNNING';
-    }
-    if ((lastItem.type === 'GENERIC' || lastItem.type === 'PLANNER_RESPONSE') && inactiveDuration < 300000) {
+    // Recent activity within 30s
+    if (inactiveDuration < 30000) {
       return 'RUNNING';
     }
 
