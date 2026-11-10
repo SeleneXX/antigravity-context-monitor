@@ -97,16 +97,19 @@ function getModelMaxWindow(modelName, promptTokens = 0) {
   if (modelName) {
     const m = String(modelName).toLowerCase();
     if (m.includes('argon') || m.includes('gemini-4') || m.includes('pro')) {
-      limit = 1000000;
+      // Antigravity 2.30 中 Argon/Pro 模型物理支持 1M，但平台自动压缩安全阈值定为 512k (512,000)
+      limit = 512000;
     } else if (m.includes('opus') || m.includes('sonnet') || m.includes('claude')) {
-      limit = 200000;
+      // Claude Opus 5.5 / Sonnet 5.5 平台自动压缩安全阈值同为 512k (512,000)
+      limit = 512000;
     } else if (m.includes('oss') || m.includes('gpt')) {
       limit = 128000;
     } else if (m.includes('flash')) {
       limit = 256000;
     }
   }
-  if (promptTokens > limit) {
+  // 容错动态逃逸：若实际 Prompt 大幅突破已知阈值（例如超过 1.15 倍），再阶梯式扩容
+  if (promptTokens > limit * 1.15) {
     if (promptTokens > 1000000) {
       limit = 2000000;
     } else {
