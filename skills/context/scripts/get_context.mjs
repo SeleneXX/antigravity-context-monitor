@@ -191,6 +191,30 @@ if (ttftSamples.length > 0) {
   ttft = Math.round((ttftSamples.reduce((a, b) => a + b, 0) / ttftSamples.length) * 10) / 10;
 }
 
+function getModelMaxWindow(modelName, promptTokens = 0) {
+  let limit = 256000;
+  if (modelName) {
+    const m = String(modelName).toLowerCase();
+    if (m.includes('argon') || m.includes('gemini-4') || m.includes('pro')) {
+      limit = 1000000;
+    } else if (m.includes('opus') || m.includes('sonnet') || m.includes('claude')) {
+      limit = 200000;
+    } else if (m.includes('oss') || m.includes('gpt')) {
+      limit = 128000;
+    } else if (m.includes('flash')) {
+      limit = 256000;
+    }
+  }
+  if (promptTokens > limit) {
+    if (promptTokens > 1000000) {
+      limit = 2000000;
+    } else {
+      limit = 1000000;
+    }
+  }
+  return limit;
+}
+
 const detectedModel = currentModel;
 const input = latestPlanner?.input_tokens || 0;
 const cache = latestPlanner?.cache_read_tokens || 0;
@@ -199,7 +223,7 @@ const prompt = input + cache;
 const stepHit = prompt > 0 ? ((cache / prompt) * 100).toFixed(1) : '0.0';
 const sessionPrompt = totalInput + totalCache;
 const sessionHit = sessionPrompt > 0 ? ((totalCache / sessionPrompt) * 100).toFixed(1) : '0.0';
-const maxWindow = 256000; // 256k 安全压缩阈值
+const maxWindow = getModelMaxWindow(detectedModel, prompt);
 const pct = ((prompt / maxWindow) * 100).toFixed(1);
 
 // Split thinking vs response tokens
@@ -669,7 +693,7 @@ if (parseFloat(pct) > 80) colorIcon = '🔴';
 else if (parseFloat(pct) > 50) colorIcon = '🟡';
 
 const stepHitSuffix = stepHit === '0.0' ? ' (冷启动/新前缀)' : ` (本步 ${stepHit}%)`;
-console.log(`⏱️ **${turns} turns · ${steps} steps** | 💾 **${formatNumber(prompt)} tok · Cache hit ${sessionHit}%**${stepHitSuffix} | ${colorIcon} **${pct}%** (${formatNumber(prompt)} / 256k)`);
+console.log(`⏱️ **${turns} turns · ${steps} steps** | 💾 **${formatNumber(prompt)} tok · Cache hit ${sessionHit}%**${stepHitSuffix} | ${colorIcon} **${pct}%** (${formatNumber(prompt)} / ${formatNumber(maxWindow)})`);
 const tpsTtftStr = tps > 0 ? ` | ⚡ **TPS**: ${tps} tok/s · **TTFT**: ${ttft > 0 ? ttft + 's' : '--'}` : '';
 console.log(`⚡ **当前模型**: ${detectedModel}${tpsTtftStr} | 🧠 **思考**: ${formatNumber(sessionThinkingTokens)} tok · 💬 **正文**: ${formatNumber(sessionResponseTokens)} tok`);
 
@@ -678,14 +702,14 @@ if (compactionsCount > 0) {
   console.log(`⚡ **平台压缩记录**: 已触发 ${compactionsCount} 次自动压缩 · 累计释放 ${formatNumber(totalReclaimedTokens)} tokens${lastInfo}`);
 }
 
-console.log(`\n**Token usage by category (安全阈值 256,000):**`);
+console.log(`\n**Token usage by category (安全阈值 ${maxWindow.toLocaleString()}):**`);
 console.log(`  ◎ User messages: ${formatNumber(userTokens)} tokens (${((userTokens / maxWindow) * 100).toFixed(1)}%)`);
 console.log(`  ◎ Agent responses: ${formatNumber(agentTokens)} tokens (${((agentTokens / maxWindow) * 100).toFixed(1)}%)`);
 console.log(`  ◎ Tool calls & outputs: ${formatNumber(toolTokens)} tokens (${((toolTokens / maxWindow) * 100).toFixed(1)}%)`);
-console.log(`  🗄️ System prompt: 12.5k tokens (4.9%)`);
-console.log(`  🗄️ System tools: 12.6k tokens (4.9%)`);
-console.log(`  🗄️ Skills: 4.3k tokens (1.7%)`);
-console.log(`  🗄️ Subagents (可用声明): 686 tokens (0.3%)`);
+console.log(`  🗄️ System prompt: 12.5k tokens (${((systemPromptTokens / maxWindow) * 100).toFixed(1)}%)`);
+console.log(`  🗄️ System tools: 12.6k tokens (${((systemToolsTokens / maxWindow) * 100).toFixed(1)}%)`);
+console.log(`  🗄️ Skills: 4.3k tokens (${((skillsTokens / maxWindow) * 100).toFixed(1)}%)`);
+console.log(`  🗄️ Subagents (可用声明): 686 tokens (${((subagentsTokens / maxWindow) * 100).toFixed(1)}%)`);
 console.log(`  ◻ Free space: ${formatNumber(freeTokens)} (${((freeTokens / maxWindow) * 100).toFixed(1)}%)`);
 
 if (subagentsList.length > 0) {

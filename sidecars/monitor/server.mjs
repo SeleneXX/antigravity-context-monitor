@@ -92,6 +92,30 @@ function calcEstimatedCost(inputTokens, cacheTokens, outputTokens, modelName) {
   return Math.round(cost * 10000) / 10000;
 }
 
+function getModelMaxWindow(modelName, promptTokens = 0) {
+  let limit = 256000;
+  if (modelName) {
+    const m = String(modelName).toLowerCase();
+    if (m.includes('argon') || m.includes('gemini-4') || m.includes('pro')) {
+      limit = 1000000;
+    } else if (m.includes('opus') || m.includes('sonnet') || m.includes('claude')) {
+      limit = 200000;
+    } else if (m.includes('oss') || m.includes('gpt')) {
+      limit = 128000;
+    } else if (m.includes('flash')) {
+      limit = 256000;
+    }
+  }
+  if (promptTokens > limit) {
+    if (promptTokens > 1000000) {
+      limit = 2000000;
+    } else {
+      limit = 1000000;
+    }
+  }
+  return limit;
+}
+
 const MODEL_SELECTION_REGEX = /setting [`'"]?Model Selection[`'"]? from .+? to (.+?)(?:\.\s*(?:No need|If reporting)|<\/USER_SETTINGS_CHANGE>|\.\s*$)/i;
 
 function detectConversationModel(convId) {
@@ -330,7 +354,11 @@ function parseTranscript(logPath, maxWindow = 256000) {
   const stepCacheHitRate = totalPrompt > 0 ? (cache / totalPrompt) * 100 : 0;
   const sessionTotalPrompt = sessionInputTokens + sessionCacheTokens;
   const sessionCacheHitRate = sessionTotalPrompt > 0 ? (sessionCacheTokens / sessionTotalPrompt) * 100 : 0;
-  const contextPercent = maxWindow > 0 ? (totalPrompt / maxWindow) * 100 : 0;
+
+  // 自适应上下文上限：根据模型与当前实际Prompt动态计算（支持 Antigravity 2.30 的 Argon 1M 窗口）
+  const modelLimit = getModelMaxWindow(detectedModel || currentModel, totalPrompt);
+  const effectiveMaxWindow = (!maxWindow || maxWindow === 256000 || totalPrompt > maxWindow) ? modelLimit : maxWindow;
+  const contextPercent = effectiveMaxWindow > 0 ? (totalPrompt / effectiveMaxWindow) * 100 : 0;
 
   const lastThinkEst = estimateTokensFromText(latestPlanner.thinking || '');
   const lastContentEst = estimateTokensFromText(latestPlanner.content || '') + estimateTokensFromText(JSON.stringify(latestPlanner.tool_calls || ''));
@@ -436,7 +464,7 @@ function parseTranscript(logPath, maxWindow = 256000) {
   const userTokens = totalDynChars > 0 ? Math.round((userChars / totalDynChars) * dynamicTokens) : 0;
   const agentTokens = totalDynChars > 0 ? Math.round((agentChars / totalDynChars) * dynamicTokens) : 0;
   const toolTokens = Math.max(0, dynamicTokens - userTokens - agentTokens);
-  const freeTokens = Math.max(0, maxWindow - totalPrompt);
+  const freeTokens = Math.max(0, effectiveMaxWindow - totalPrompt);
 
   const breakdown = {
     userMessages: userTokens,
@@ -448,7 +476,7 @@ function parseTranscript(logPath, maxWindow = 256000) {
     subagents: subagentsTokens,
     freeSpace: freeTokens,
     activePrompt: totalPrompt,
-    maxWindow,
+    maxWindow: effectiveMaxWindow,
     systemFiles: ['~/.gemini/GEMINI.md']
   };
 
@@ -457,6 +485,7 @@ function parseTranscript(logPath, maxWindow = 256000) {
     steps,
     model: detectedModel,
     detectedModel,
+    maxWindow: effectiveMaxWindow,
     inputTokens: input,
     cacheTokens: cache,
     totalPromptTokens: totalPrompt,
@@ -1045,9 +1074,10 @@ const server = http.createServer((req, res) => {
       return;
     }
 
-    const maxWindow = parseInt(reqUrl.searchParams.get('max_window') || '256000', 10);
-    const stats = parseTranscript(target.logPath, maxWindow);
-    const subagents = getSubagentsForConversation(target.id, maxWindow);
+    const reqMaxWindow = reqUrl.searchParams.get('max_window') ? parseInt(reqUrl.searchParams.get('max_window'), 10) : 0;
+    const stats = parseTranscript(target.logPath, reqMaxWindow);
+    const activeMaxWindow = stats?.maxWindow || 256000;
+    const subagents = getSubagentsForConversation(target.id, reqMaxWindow || activeMaxWindow);
 
     let combinedTotalPrompt = stats.totalPromptTokens;
     let combinedOutputTokens = stats.outputTokens;
@@ -1077,8 +1107,8 @@ const server = http.createServer((req, res) => {
     const combinedCacheHitRate = combinedAllPrompt > 0 
       ? Math.round((combinedCacheTotal / combinedAllPrompt) * 1000) / 10 
       : stats.cacheHitRate;
-    const combinedContextPercent = maxWindow > 0 
-      ? Math.round((combinedTotalPrompt / maxWindow) * 1000) / 10 
+    const combinedContextPercent = activeMaxWindow > 0 
+      ? Math.round((combinedTotalPrompt / activeMaxWindow) * 1000) / 10 
       : 0;
 
     let speedSum = (stats.tps || stats.tokPerSec || 0);
@@ -1125,8 +1155,8 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({
       conversationId: target.id,
       updatedAt: target.updatedAtIso,
-      maxWindow,
       ...stats,
+      maxWindow: activeMaxWindow,
       subagents,
       allAgentsSummary
     }));
