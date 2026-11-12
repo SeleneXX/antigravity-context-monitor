@@ -35,12 +35,15 @@
 ## ✨ 核心特性
 
 - 📊 **侧边栏实时可视化看板 (Sidecar Auxiliary Pane)**:
-  - **环形水位表盘 (Donut Gauge)**：直观展示已用 Token / 窗口容量，支持平台安全阈值预警（256K / 1M / 2M 满额截断）。
+  - **环形水位表盘 (Donut Gauge)**：直观展示已用 Token / 安全压缩容量，自动识别当前模型并匹配平台压缩阈值（Gemini Carbon / Argon / Flash 256K、Claude Opus / Sonnet 512K，灰度突破时自动阶梯扩容）。
   - **200 格点阵图 (Context Usage Matrix Map)**：精细化映射上下文构成，哪些是工具输出、哪些是历史对话、哪些是系统提示词一目了然。
   - **Token 分类深度剖析**：精确区分 `User messages`、`Agent responses`、`Tool calls & outputs`、`System prompt`、`System tools`、`Skills`、`Subagents 声明` 与 `Free space`。
   - **性能实时指标**：实时计算推理 TPS (tok/s)、首字响应延迟 (TTFT)、Prompt Cache 累计与最新单步命中率。
-  - **Subagents 隔离追踪**：针对复杂任务中的多智能体协作，独立展示每个 Subagent 的独立沙盒上下文消耗与思考/正文输出量。
+  - **Subagents 隔离与生命周期追踪**：独立展示每个 Subagent 的沙盒上下文与模型层级，基于时序状态机精准识别 `等待后台任务`（如编译/测试）、`上下文压缩中`、`模型推理中` 等细分运行态。
   - **Step 消耗时序日志**：清晰追溯过去每一步的 Prompt 增量与 Cache Hit 状态。
+
+- 🔄 **全链路免重启热重载 (Live Hot-Reload)**:
+  - 修改 `core/*` 逻辑、`public/*` 前端界面或点击面板右上角 `↻` 按钮均可实时热更新生效，开发调试无需反复重启 Antigravity。
 
 - ⚡ **即时技能查询 (`/context`)**:
   - 在对话中直接输入 `/context` 或询问“用了多少上下文”，智能 Agent 即可调取脚本输出即时状态摘要并提供侧边栏直达链接。
