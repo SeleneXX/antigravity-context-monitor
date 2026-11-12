@@ -4,646 +4,11 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Context Monitor - 上下文监控看板</title>
-  <style>
-    :root {
-      --bg: #121316;
-      --card-bg: #1c1d22;
-      --card-border: #2b2c34;
-      --text-main: #f0f1f5;
-      --text-muted: #8b8e9f;
-      --accent-blue: #4ea8de;
-      --accent-green: #52b788;
-      --accent-purple: #9d4edd;
-      --accent-amber: #f7a072;
-      --accent-red: #e63946;
-      --bar-bg: #22232a;
-    }
-
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    }
-
-    body {
-      background-color: var(--bg);
-      color: var(--text-main);
-      padding: 16px;
-      font-size: 13px;
-      line-height: 1.5;
-      user-select: none;
-    }
-
-    /* Header */
-    .header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 16px;
-      padding-bottom: 12px;
-      border-bottom: 1px solid var(--card-border);
-    }
-    .title-area {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    .title-area h2 {
-      font-size: 15px;
-      font-weight: 600;
-      letter-spacing: -0.2px;
-    }
-    .live-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      padding: 2px 7px;
-      border-radius: 12px;
-      background: rgba(82, 183, 136, 0.15);
-      color: var(--accent-green);
-      font-size: 10px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    .live-dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: var(--accent-green);
-      box-shadow: 0 0 6px var(--accent-green);
-      animation: pulse 1.8s infinite;
-    }
-    @keyframes pulse {
-      0% { opacity: 0.4; }
-      50% { opacity: 1; }
-      100% { opacity: 0.4; }
-    }
-
-    .controls-area {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    select, button {
-      background: var(--card-bg);
-      color: var(--text-main);
-      border: 1px solid var(--card-border);
-      border-radius: 6px;
-      padding: 4px 8px;
-      font-size: 11px;
-      outline: none;
-      cursor: pointer;
-    }
-    select:hover, button:hover {
-      border-color: #4a4b56;
-    }
-
-    /* Exact Screenshot Replication Bar */
-    .screenshot-bar {
-      display: flex;
-      align-items: center;
-      justify-content: space-around;
-      background: #18191e;
-      border: 1px solid #2a2b34;
-      border-radius: 8px;
-      padding: 9px 14px;
-      margin-bottom: 18px;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
-    }
-    .bar-stat {
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      font-size: 12px;
-      color: #cfd2dc;
-      font-feature-settings: "tnum";
-    }
-    .bar-stat svg {
-      opacity: 0.85;
-      flex-shrink: 0;
-    }
-    .bar-divider {
-      width: 1px;
-      height: 18px;
-      background: #2a2b34;
-    }
-    .ring-wrap {
-      position: relative;
-      width: 18px;
-      height: 18px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .ring-svg {
-      transform: rotate(-90deg);
-    }
-    .ring-bg {
-      stroke: #2e303c;
-    }
-    .ring-fg {
-      stroke: var(--accent-green);
-      stroke-linecap: round;
-      transition: stroke-dashoffset 0.5s ease, stroke 0.3s;
-    }
-
-    /* Main Gauge and Cards */
-    .grid {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 14px;
-      margin-bottom: 18px;
-    }
-
-    .card {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 8px;
-      padding: 14px;
-    }
-    .card-title {
-      font-size: 11px;
-      font-weight: 600;
-      color: var(--text-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      margin-bottom: 10px;
-      display: flex;
-      justify-content: space-between;
-    }
-
-    /* Gauge Card */
-    .gauge-card {
-      text-align: center;
-      padding: 18px 14px;
-    }
-    .gauge-container {
-      position: relative;
-      width: 120px;
-      height: 120px;
-      margin: 0 auto 12px;
-    }
-    .gauge-svg {
-      width: 100%;
-      height: 100%;
-      transform: rotate(-90deg);
-    }
-    .gauge-bg {
-      stroke: #24252f;
-    }
-    .gauge-val {
-      stroke: var(--accent-blue);
-      stroke-linecap: round;
-      transition: stroke-dashoffset 0.6s ease, stroke 0.4s;
-    }
-    .gauge-inner-text {
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-    }
-    .gauge-pct {
-      font-size: 22px;
-      font-weight: 700;
-      color: #fff;
-    }
-    .gauge-label {
-      font-size: 10px;
-      color: var(--text-muted);
-      margin-top: -2px;
-    }
-
-    /* Breakdown Bar */
-    .progress-bar-wrap {
-      width: 100%;
-      height: 10px;
-      background: #24252f;
-      border-radius: 5px;
-      overflow: hidden;
-      display: flex;
-      margin: 12px 0 6px;
-    }
-    .bar-cache {
-      background: var(--accent-purple);
-      height: 100%;
-      transition: width 0.4s ease;
-    }
-    .bar-input {
-      background: var(--accent-blue);
-      height: 100%;
-      transition: width 0.4s ease;
-    }
-    .progress-legend {
-      display: flex;
-      justify-content: space-between;
-      font-size: 11px;
-      color: var(--text-muted);
-      margin-top: 4px;
-    }
-    .legend-item {
-      display: flex;
-      align-items: center;
-      gap: 5px;
-    }
-    .legend-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 2px;
-    }
-
-    /* Stats Grid */
-    .stat-row {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 8px;
-    }
-    .stat-tile {
-      background: #17181d;
-      border: 1px solid #262732;
-      border-radius: 6px;
-      padding: 9px 11px;
-    }
-    .stat-tile .label {
-      font-size: 11px;
-      color: var(--text-muted);
-      margin-bottom: 2px;
-    }
-    .stat-tile .value {
-      font-size: 14px;
-      font-weight: 600;
-      color: var(--text-main);
-      font-feature-settings: "tnum";
-    }
-
-    /* History Table */
-    .table-container {
-      max-height: 260px;
-      overflow-y: auto;
-      overflow-x: auto;
-      margin-top: 8px;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 11px;
-      font-feature-settings: "tnum";
-    }
-    th {
-      text-align: left;
-      padding: 6px 8px;
-      color: var(--text-muted);
-      border-bottom: 1px solid var(--card-border);
-      font-weight: 500;
-      position: sticky;
-      top: 0;
-      background: var(--card-bg);
-      white-space: nowrap;
-    }
-    td {
-      padding: 6px 8px;
-      border-bottom: 1px solid #23242c;
-      color: #b0b3c2;
-    }
-    tr:last-child td {
-      border-bottom: none;
-    }
-    .step-badge {
-      display: inline-block;
-      padding: 1px 5px;
-      background: #252631;
-      border-radius: 4px;
-      color: #9da0b0;
-    }
-
-    /* Context Breakdown Styles (CLI /context 同款) */
-    .breakdown-container {
-      display: grid;
-      grid-template-columns: minmax(180px, 1.1fr) minmax(220px, 1.5fr);
-      gap: 14px;
-      margin-top: 8px;
-      align-items: start;
-    }
-    @media (max-width: 520px) {
-      .breakdown-container {
-        grid-template-columns: 1fr;
-      }
-    }
-    .breakdown-grid-wrap {
-      background: #14151b;
-      border: 1px solid #232530;
-      border-radius: 6px;
-      padding: 10px;
-    }
-    .matrix-title {
-      font-size: 11px;
-      color: var(--text-muted);
-      margin-bottom: 8px;
-    }
-    .dot-matrix {
-      display: grid;
-      grid-template-columns: repeat(20, 1fr);
-      gap: 3px;
-    }
-    .dot-square {
-      aspect-ratio: 1;
-      border-radius: 2px;
-      background: #252836;
-      border: 1px solid rgba(255, 255, 255, 0.05);
-      transition: transform 0.15s ease;
-    }
-    .dot-square:hover {
-      transform: scale(1.4);
-      z-index: 10;
-    }
-    .system-files-note {
-      margin-top: 10px;
-      font-size: 10px;
-      color: var(--text-muted);
-    }
-    .system-files-note code {
-      color: #9ece6a;
-      background: #1a1b24;
-      padding: 1px 4px;
-      border-radius: 3px;
-    }
-    .breakdown-list {
-      display: flex;
-      flex-direction: column;
-      gap: 5px;
-    }
-    .list-heading {
-      font-size: 11px;
-      color: var(--text-muted);
-      font-weight: 500;
-      margin-bottom: 2px;
-    }
-    .category-item {
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      font-size: 11px;
-      padding: 3px 6px;
-      border-radius: 4px;
-      background: #161720;
-    }
-    .category-item .cat-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      flex-shrink: 0;
-    }
-    .category-item .cat-name {
-      color: #c0caf5;
-      flex: 1;
-    }
-    .category-item .cat-val {
-      font-family: monospace;
-      color: #7aa2f7;
-      font-weight: 500;
-      font-size: 10.5px;
-    }
-    .category-item.free-space .cat-val {
-      color: #565f89;
-    }
-    .subagent-isolated-badge {
-      margin-top: 6px;
-      padding: 6px 8px;
-      background: rgba(122, 162, 247, 0.08);
-      border: 1px solid rgba(122, 162, 247, 0.2);
-      border-radius: 5px;
-      font-size: 10px;
-      color: #7aa2f7;
-      line-height: 1.4;
-    }
-
-    /* Stats Tabs Switcher (Inside 统计详情) */
-    .stats-tabs {
-      display: inline-flex;
-      background: #14151a;
-      padding: 2px;
-      border-radius: 6px;
-      border: 1px solid var(--card-border);
-      gap: 3px;
-    }
-    .stats-tab {
-      background: transparent;
-      color: var(--text-muted);
-      border: 1px solid transparent;
-      border-radius: 4px;
-      padding: 3px 9px;
-      font-size: 11px;
-      font-weight: 500;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      transition: all 0.2s ease;
-    }
-    .stats-tab:hover {
-      color: var(--text-main);
-    }
-    .stats-tab.active {
-      background: #252733;
-      color: #fff;
-      border-color: #3b3d4f;
-      font-weight: 600;
-      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
-    }
-    .tab-badge {
-      display: inline-block;
-      padding: 0 5px;
-      border-radius: 10px;
-      background: #272936;
-      color: #7aa2f7;
-      font-size: 9.5px;
-      font-weight: 600;
-      transition: all 0.2s;
-    }
-    .stats-tab.active .tab-badge {
-      background: rgba(82, 183, 136, 0.25);
-      color: var(--accent-green);
-    }
-
-    /* Subagent Roster Styles */
-    .subagent-list {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      margin-top: 4px;
-    }
-    .subagent-card {
-      background: #15161c;
-      border: 1px solid #282a36;
-      border-radius: 6px;
-      padding: 10px 12px;
-      transition: border-color 0.2s, box-shadow 0.2s;
-    }
-    .subagent-card:hover {
-      border-color: #3b3f52;
-    }
-    .subagent-card.running {
-      border-color: rgba(122, 162, 247, 0.45);
-      background: linear-gradient(180deg, #181b26 0%, #14151e 100%);
-      box-shadow: 0 2px 10px rgba(122, 162, 247, 0.1);
-    }
-    .subagent-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 8px;
-    }
-    .subagent-title {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-weight: 600;
-      font-size: 12px;
-      color: #e0e2ec;
-    }
-    .type-tag {
-      font-size: 9.5px;
-      padding: 1px 5px;
-      border-radius: 3px;
-      background: rgba(122, 162, 247, 0.15);
-      color: #7aa2f7;
-      text-transform: uppercase;
-      font-weight: 600;
-    }
-    .model-tag {
-      font-size: 9.5px;
-      padding: 1px 6px;
-      border-radius: 3px;
-      font-weight: 600;
-      display: inline-flex;
-      align-items: center;
-      gap: 3px;
-    }
-    .model-tag.model-flash {
-      background: rgba(122, 162, 247, 0.15);
-      color: #7aa2f7;
-      border: 1px solid rgba(122, 162, 247, 0.3);
-    }
-    .model-tag.model-pro {
-      background: rgba(187, 154, 247, 0.18);
-      color: #bb9af7;
-      border: 1px solid rgba(187, 154, 247, 0.35);
-    }
-    .model-tag.model-inherit {
-      background: rgba(115, 218, 202, 0.15);
-      color: #73daca;
-      border: 1px solid rgba(115, 218, 202, 0.3);
-    }
-    .model-tag.model-flash_lite {
-      background: rgba(115, 218, 202, 0.15);
-      color: #73daca;
-      border: 1px solid rgba(115, 218, 202, 0.3);
-    }
-    .status-tag {
-      font-size: 10px;
-      font-weight: 600;
-      padding: 2px 7px;
-      border-radius: 4px;
-    }
-    .status-tag.done {
-      background: rgba(82, 183, 136, 0.15);
-      color: var(--accent-green);
-    }
-    .status-tag.running {
-      background: rgba(78, 168, 222, 0.2);
-      color: var(--accent-blue);
-      animation: pulse 1.5s infinite;
-    }
-    .status-tag.stopped {
-      background: rgba(139, 142, 159, 0.2);
-      color: #8b8e9f;
-    }
-    .subagent-metrics {
-      display: grid;
-      grid-template-columns: repeat(5, 1fr);
-      gap: 6px;
-      background: #101115;
-      padding: 8px;
-      border-radius: 5px;
-      font-size: 11px;
-    }
-    @media (max-width: 480px) {
-      .subagent-metrics {
-        grid-template-columns: repeat(2, 1fr);
-      }
-    }
-    .subagent-metric-item {
-      display: flex;
-      flex-direction: column;
-    }
-    .metric-lbl {
-      color: var(--text-muted);
-      font-size: 9.5px;
-      margin-bottom: 1px;
-    }
-    .metric-val {
-      font-weight: 600;
-      color: #cfd2dc;
-      font-feature-settings: "tnum";
-    }
-    .subagent-meta {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-top: 6px;
-      font-size: 10px;
-      color: #565f89;
-      font-family: monospace;
-    }
-    .subagent-empty {
-      text-align: center;
-      padding: 18px 14px;
-      background: #14151a;
-      border: 1px dashed #282a36;
-      border-radius: 6px;
-      color: var(--text-muted);
-    }
-    .subagent-empty-icon {
-      font-size: 24px;
-      margin-bottom: 6px;
-      opacity: 0.85;
-    }
-    .subagent-empty-title {
-      font-size: 12px;
-      font-weight: 600;
-      color: #c0caf5;
-      margin-bottom: 4px;
-    }
-    .subagent-empty-desc {
-      font-size: 11px;
-      color: #717588;
-      max-width: 380px;
-      margin: 0 auto;
-      line-height: 1.45;
-    }
-    .spin-anim {
-      animation: spin 0.6s linear;
-    }
-    @keyframes spin {
-      100% { transform: rotate(360deg); }
-    }
-
-    /* Footer */
-    .footer {
-      text-align: center;
-      font-size: 10px;
-      color: #636573;
-      margin-top: 14px;
-    }
-  </style>
+  <!-- INLINE_STYLES -->
 </head>
 <body>
 
-  <!-- Header -->
+  <!-- 顶部标题栏与强制刷新按钮 -->
   <div class="header">
     <div class="title-area">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent-blue)">
@@ -653,14 +18,16 @@
       <span class="live-badge"><span class="live-dot"></span> LIVE</span>
     </div>
     <div class="controls-area">
-      <button id="refreshBtn" title="立即刷新">↻</button>
+      <span id="refreshToast" class="refresh-toast">✓ 已刷新</span>
+      <button id="refreshBtn" title="清空缓存并强制刷新前后端状态（按住 Shift 点击可整页重载）">
+        <span class="spin-icon">↻</span>
+      </button>
     </div>
   </div>
 
-  <!-- Screenshot Replicated Bar (输入框同款状态栏) -->
+  <!-- 顶部紧凑状态条 -->
   <div class="screenshot-bar">
     <div class="bar-stat" title="交互轮次与执行步骤">
-      <!-- Speedometer Icon -->
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M12 14v-4"/>
         <path d="M3.34 19a10 10 0 1 1 17.32 0"/>
@@ -671,7 +38,6 @@
     <div class="bar-divider"></div>
 
     <div class="bar-stat" id="barCacheStat" title="总 Prompt 上下文与缓存命中率">
-      <!-- Database / Cylinder Icon -->
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <ellipse cx="12" cy="5" rx="9" ry="3"/>
         <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
@@ -682,8 +48,7 @@
 
     <div class="bar-divider"></div>
 
-    <div class="bar-stat" title="当前上下文占压缩上限百分比">
-      <!-- Circular Progress -->
+    <div class="bar-stat" title="当前上下文占压缩安全阈值百分比">
       <div class="ring-wrap">
         <svg class="ring-svg" width="16" height="16" viewBox="0 0 24 24">
           <circle class="ring-bg" cx="12" cy="12" r="9" stroke-width="2.8" fill="none"/>
@@ -694,15 +59,15 @@
     </div>
   </div>
 
-  <!-- Compaction Alert Banner -->
-  <div id="compactionBanner" class="compaction-banner" style="display:none;margin-bottom:14px;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.35);border-radius:8px;padding:9px 14px;color:#fbbf24;font-size:12px;display:flex;align-items:center;gap:10px;">
-    <span class="compaction-icon">⚡</span>
+  <!-- 平台自动压缩提示横幅 -->
+  <div id="compactionBanner" class="compaction-banner">
+    <span>⚡</span>
     <span id="compactionText">已触发 0 次平台自动压缩</span>
   </div>
 
-  <!-- Detailed Dashboard -->
+  <!-- 主仪表盘网格 -->
   <div class="grid">
-    <!-- Big Gauge Card -->
+    <!-- 核心水位仪表盘 -->
     <div class="card gauge-card">
       <div class="gauge-container">
         <svg class="gauge-svg" viewBox="0 0 100 100">
@@ -719,10 +84,12 @@
         <span id="promptTokDisplay">0</span> / <span id="maxWindowDisplay">256,000</span> Tokens
       </div>
       <div id="thresholdLabel" style="font-size: 10.5px; color: #8a8f98; margin-top: 3px;">
-        平台压缩安全阈值 (256k 满额截断)
+        平台压缩安全阈值 (256K 满额截断)
+      </div>
+      <div>
+        <span id="modelDisplayPill" class="model-pill">⚡ Gemini 3.8 Flash</span>
       </div>
 
-      <!-- Ratio Progress Bar -->
       <div class="progress-bar-wrap">
         <div id="barCachePart" class="bar-cache" style="width: 0%" title="Prompt Cache 命中部分"></div>
         <div id="barInputPart" class="bar-input" style="width: 0%" title="新输入 Prompt 部分"></div>
@@ -733,9 +100,9 @@
       </div>
     </div>
 
-    <!-- Stat Tiles -->
+    <!-- 统计详情切换卡片 -->
     <div class="card">
-      <div class="card-title" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+      <div class="card-title">
         <div style="display: flex; align-items: center; gap: 8px;">
           <span>统计详情</span>
           <span id="convIdShort" style="font-family:monospace;font-size:10px;color:#6b6e7d"></span>
@@ -749,87 +116,79 @@
         </div>
       </div>
 
-      <!-- Main Agent Stats View -->
       <div id="statsMainView" class="stat-row">
         <div class="stat-tile">
           <div class="label">Cache 命中率 (累计)</div>
           <div class="value" id="cardHitRate" style="color:var(--accent-green)">0%</div>
-          <div id="cardHitRateSub" style="font-size:10px;color:#8a8f98;margin-top:2px">最新步: --%</div>
+          <div id="cardHitRateSub" class="stat-sub">最新步: --%</div>
         </div>
         <div class="stat-tile">
           <div class="label">总累计 Token (吞吐)</div>
           <div class="value" id="cardTotalTok">0</div>
-          <div id="cardSessionThinkBreakdown" style="font-size:10px;color:#8a8f98;margin-top:2px">🧠 思考: 0 · 💬 正文: 0</div>
+          <div id="cardSessionThinkBreakdown" class="stat-sub">🧠 思考: 0 · 💬 正文: 0</div>
         </div>
         <div class="stat-tile">
           <div class="label">TPS (生成速率)</div>
           <div class="value" id="cardTps" style="color:var(--accent-purple)">0 tok/s</div>
-          <div id="cardTpsSub" style="font-size:10px;color:#8a8f98;margin-top:2px">近期: 0 tok/s · 峰值: 0 tok/s</div>
+          <div id="cardTpsSub" class="stat-sub">近期: 0 tok/s · 峰值: 0 tok/s</div>
         </div>
         <div class="stat-tile">
           <div class="label">TTFT (首字响应延迟)</div>
-          <div class="value" id="cardTtft" style="color:var(--accent-blue)">0s</div>
-          <div id="cardTtftSub" style="font-size:10px;color:#8a8f98;margin-top:2px">Time To First Token · 用户: 0s</div>
+          <div class="value" id="cardTtft" style="color:var(--accent-blue)">--</div>
+          <div id="cardTtftSub" class="stat-sub">近期: -- · 用户响应: --</div>
         </div>
       </div>
 
-      <!-- All Agents Summary Stats View -->
       <div id="statsAllView" class="stat-row" style="display: none;">
         <div class="stat-tile">
           <div class="label">综合 Cache 命中率</div>
           <div class="value" id="cardAllHitRate" style="color:var(--accent-green)">0%</div>
-          <div id="cardAllHitRateSub" style="font-size:10px;color:#8a8f98;margin-top:2px">含全部 Subagents 累计</div>
+          <div id="cardAllHitRateSub" class="stat-sub">含全部 Subagents 累计</div>
         </div>
         <div class="stat-tile">
           <div class="label">全量总消耗 Token</div>
           <div class="value" id="cardAllTotalTok">0</div>
-          <div id="cardAllOutputBreakdown" style="font-size:10px;color:#8a8f98;margin-top:2px">🧠 思考: 0 · 💬 正文: 0</div>
+          <div id="cardAllOutputBreakdown" class="stat-sub">🧠 思考: 0 · 💬 正文: 0</div>
         </div>
         <div class="stat-tile">
           <div class="label">综合 TPS (吞吐速率)</div>
           <div class="value" id="cardAllTps" style="color:var(--accent-purple)">0 tok/s</div>
-          <div id="cardAllTpsSub" style="font-size:10px;color:#8a8f98;margin-top:2px">主 Agent + Subagents 协同速率</div>
+          <div id="cardAllTpsSub" class="stat-sub">主 Agent + Subagents 协同速率</div>
         </div>
         <div class="stat-tile">
           <div class="label">综合平均 TTFT</div>
-          <div class="value" id="cardAllTtft" style="color:var(--accent-blue)">0s</div>
-          <div id="cardAllTtftSub" style="font-size:10px;color:#8a8f98;margin-top:2px">集群多 Agent 平均首 Token 响应</div>
+          <div class="value" id="cardAllTtft" style="color:var(--accent-blue)">--</div>
+          <div id="cardAllTtftSub" class="stat-sub">集群多 Agent 平均首 Token 响应延迟</div>
         </div>
       </div>
     </div>
 
-    <!-- Subagents Panel (子智能体集群) -->
-    <div class="card" id="subagentsCard" style="grid-column: 1 / -1;">
+    <!-- Subagents 集群面板 -->
+    <div class="card" id="subagentsCard">
       <div class="card-title">
         <span>Subagents 执行详情 · 子智能体集群</span>
         <span id="subagentsHeaderBadge" style="font-size:11px;font-weight:normal;color:var(--accent-blue)">0 个子智能体</span>
       </div>
-      <div id="subagentsContent">
-        <!-- Rendered by JS -->
-      </div>
+      <div id="subagentsContent"></div>
     </div>
 
-    <!-- Context Breakdown Block (CLI /context 同款分类分块) -->
-    <div class="card" style="grid-column: 1 / -1;">
+    <!-- 上下文分类点阵图 -->
+    <div class="card">
       <div class="card-title">
         <span>Context Breakdown · 上下文分类占用</span>
-        <span id="breakdownModelBadge" style="font-size:11px;font-weight:normal;color:#9d7cd8">0k / 256k (0%)</span>
+        <span id="breakdownModelBadge" style="font-size:11px;font-weight:normal;color:#9d7cd8">0 / 256K (0%)</span>
       </div>
-      
+
       <div class="breakdown-container">
-        <!-- Dot Grid Matrix (200 squares: 10 rows x 20 cols) -->
         <div class="breakdown-grid-wrap">
-          <div class="matrix-title" id="matrixTitle">Context Usage Map (点阵图 · 200格 · 每格 1,280 tok / 0.5%)</div>
-          <div class="dot-matrix" id="dotMatrix">
-            <!-- 200 dots generated by JS -->
-          </div>
+          <div class="matrix-title" id="matrixTitle">Context Usage Map (点阵图 · 200格 · 每格 1.3K tok / 0.5%)</div>
+          <div class="dot-matrix" id="dotMatrix"></div>
           <div class="system-files-note">
             <span style="opacity:0.6">System files · auto-loaded:</span>
             <code>~/.gemini/GEMINI.md</code>
           </div>
         </div>
 
-        <!-- Breakdown List -->
         <div class="breakdown-list">
           <div class="list-heading">Token usage by category</div>
           <div class="category-item">
@@ -844,36 +203,35 @@
           </div>
           <div class="category-item">
             <span class="cat-dot" style="background:#e0af68"></span>
-            <span class="cat-name">Tool calls & outputs:</span>
+            <span class="cat-name">Tool calls &amp; outputs:</span>
             <span class="cat-val" id="catTools">0 tokens (0.0%)</span>
           </div>
           <div class="category-item">
             <span class="cat-dot" style="background:#bb9af7"></span>
             <span class="cat-name">System prompt:</span>
-            <span class="cat-val" id="catSysPrompt">12.5k tokens (1.2%)</span>
+            <span class="cat-val" id="catSysPrompt">12.5K tokens (4.9%)</span>
           </div>
           <div class="category-item">
             <span class="cat-dot" style="background:#7dcfff"></span>
             <span class="cat-name">System tools:</span>
-            <span class="cat-val" id="catSysTools">12.6k tokens (1.2%)</span>
+            <span class="cat-val" id="catSysTools">12.6K tokens (4.9%)</span>
           </div>
           <div class="category-item">
             <span class="cat-dot" style="background:#f7768e"></span>
             <span class="cat-name">Skills:</span>
-            <span class="cat-val" id="catSkills">4.3k tokens (0.4%)</span>
+            <span class="cat-val" id="catSkills">4.3K tokens (1.7%)</span>
           </div>
           <div class="category-item">
             <span class="cat-dot" style="background:#ff9e64"></span>
             <span class="cat-name">Subagents (可用声明):</span>
-            <span class="cat-val" id="catSubagents">686 tokens (0.1%)</span>
+            <span class="cat-val" id="catSubagents">686 tokens (0.3%)</span>
           </div>
           <div class="category-item free-space">
             <span class="cat-dot" style="background:#414868"></span>
             <span class="cat-name">Free space:</span>
-            <span class="cat-val" id="catFree">256k (100%)</span>
+            <span class="cat-val" id="catFree">256K (100%)</span>
           </div>
-          
-          <!-- Subagent Isolation Note -->
+
           <div class="subagent-isolated-badge">
             <span>🛡️ <strong>Subagent 独立隔离空间</strong>：子智能体运行于专属独立进程与子会话，执行细节绝不挤占主 Agent 上下文。</span>
           </div>
@@ -881,7 +239,7 @@
       </div>
     </div>
 
-    <!-- Step History Table -->
+    <!-- 最近步骤消耗记录 -->
     <div class="card">
       <div class="card-title">最近步骤消耗记录</div>
       <div class="table-container">
@@ -891,7 +249,7 @@
               <th>Step</th>
               <th>时间 (开始 → 完成)</th>
               <th>Prompt 上下文</th>
-              <th>Cache 状态 & 命中率</th>
+              <th>Cache 状态 &amp; 命中率</th>
               <th>输出 (🧠思考 · 💬正文)</th>
             </tr>
           </thead>
@@ -904,489 +262,9 @@
   </div>
 
   <div class="footer">
-    Antigravity Context Monitor · 自动每 1.5 秒更新
+    Antigravity Context Monitor · 实时每 1.5 秒同步 · 支持文件热重载
   </div>
 
-  <script>
-    let currentWindow = 256000;
-    let timer = null;
-    let statsTab = 'main'; // 'main' | 'all'
-    let lastData = null;
-
-    function formatNumber(num) {
-      if (!num) return '0';
-      if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
-      if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
-      return num.toLocaleString();
-    }
-
-    function formatTime(isoStr) {
-      if (!isoStr) return '';
-      try {
-        const d = new Date(isoStr);
-        if (isNaN(d.getTime())) return '';
-        const hh = String(d.getHours()).padStart(2, '0');
-        const mm = String(d.getMinutes()).padStart(2, '0');
-        const ss = String(d.getSeconds()).padStart(2, '0');
-        return `${hh}:${mm}:${ss}`;
-      } catch (e) {
-        return '';
-      }
-    }
-
-    function escapeHtml(str) {
-      if (!str) return '';
-      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    }
-
-    async function fetchStats() {
-      try {
-        const params = new URLSearchParams(window.location.search);
-        const convId = params.get('conversationId') || params.get('conversation_id') || '';
-        const token = params.get('token') || '';
-        let url = `/api/stats?max_window=${currentWindow}`;
-        if (convId) url += `&conversationId=${encodeURIComponent(convId)}`;
-        if (token) url += `&token=${encodeURIComponent(token)}`;
-        const res = await fetch(url);
-        if (!res.ok) throw new Error('API request failed');
-        const data = await res.json();
-        lastData = data;
-        updateUI(data);
-      } catch (err) {
-        console.error('Fetch error:', err);
-      }
-    }
-
-    function updateUI(data) {
-      if (!data) return;
-      lastData = data;
-
-      if (data.maxWindow) {
-        currentWindow = data.maxWindow;
-      }
-      const threshEl = document.getElementById('thresholdLabel');
-      if (threshEl) {
-        threshEl.innerText = `平台压缩安全阈值 (${formatNumber(currentWindow)} 满额截断)`;
-      }
-
-      const summary = data.allAgentsSummary || {};
-      const subList = data.subagents || [];
-
-      // 1. Screenshot Bar (始终反映主 Agent 自身交互轮次与上下文窗口)
-      document.getElementById('barTurns').innerText = data.turns || 0;
-      document.getElementById('barSteps').innerText = data.steps || 0;
-      const currentSpeed = (data.tps || data.tokPerSec || 0);
-      document.getElementById('barSpeed').innerText = (currentSpeed > 0 ? currentSpeed : '~200');
-      document.getElementById('barTotalTokens').innerText = formatNumber(data.totalPromptTokens || 0);
-      document.getElementById('barCacheHit').innerText = `${data.sessionCacheHitRate || data.cacheHitRate || 0}%`;
-
-      const detectedModelName = data.detectedModel || data.model || 'Gemini 3.8 Flash';
-
-      const hitTitle = `【主 Agent】当前活跃 Prompt: ${formatNumber(data.totalPromptTokens || 0)} tok | 全会话累计总吞吐: ${formatNumber(data.sessionTotalTokens || 0)} tok (Cache 命中: ${formatNumber(data.sessionCacheTokens || 0)}, 累计命中率: ${data.sessionCacheHitRate || data.cacheHitRate || 0}%)`;
-      const cacheStat = document.getElementById('barCacheStat');
-      if (cacheStat) cacheStat.setAttribute('title', hitTitle);
-      document.getElementById('barPercent').innerText = `${data.contextPercent || 0}%`;
-
-      // Compaction Banner
-      const compBanner = document.getElementById('compactionBanner');
-      const compText = document.getElementById('compactionText');
-      const comp = data.compaction || data.compactions;
-      if (compBanner && comp && comp.count > 0) {
-        compBanner.style.display = 'flex';
-        const last = comp.lastCompaction;
-        let lastInfo = '';
-        if (last) {
-          const recTok = last.reclaimedTokens ?? 0;
-          const dropPct = last.reductionPercent ?? last.dropPercent ?? 0;
-          lastInfo = ` (最近一次: 释放 ${formatNumber(recTok)} tok，压缩率 -${dropPct}%)`;
-        }
-        const totalRec = comp.totalReclaimedTokens ?? comp.reclaimedTokens ?? 0;
-        compText.innerHTML = `已检测到 <strong>${comp.count}</strong> 次系统上下文压缩 · 累计释放 <strong>${formatNumber(totalRec)}</strong> tokens${lastInfo}`;
-      } else if (compBanner) {
-        compBanner.style.display = 'none';
-      }
-
-      // Mini circle stroke (circumference = 2 * PI * 9 ≈ 56.54)
-      const miniCircum = 56.54;
-      const miniPct = Math.min(100, Math.max(0, data.contextPercent || 0));
-      const miniOffset = miniCircum - (miniPct / 100) * miniCircum;
-      const miniEl = document.getElementById('miniCircle');
-      miniEl.style.strokeDashoffset = miniOffset;
-      if (miniPct > 80) miniEl.style.stroke = 'var(--accent-red)';
-      else if (miniPct > 50) miniEl.style.stroke = 'var(--accent-amber)';
-      else miniEl.style.stroke = 'var(--accent-green)';
-
-      // 2. Big Gauge (反映主 Agent 自身 256k 压缩阈值利用率)
-      const bigCircum = 251.32;
-      const bigOffset = bigCircum - (miniPct / 100) * bigCircum;
-      const bigEl = document.getElementById('bigGauge');
-      bigEl.style.strokeDashoffset = bigOffset;
-      if (miniPct > 80) bigEl.style.stroke = 'var(--accent-red)';
-      else if (miniPct > 50) bigEl.style.stroke = 'var(--accent-amber)';
-      else bigEl.style.stroke = 'var(--accent-blue)';
-
-      document.getElementById('gaugePct').innerText = `${data.contextPercent || 0}%`;
-      const gaugeLabel = document.querySelector('.gauge-label');
-      if (gaugeLabel) gaugeLabel.innerText = 'Context Used';
-
-      document.getElementById('promptTokDisplay').innerText = (data.totalPromptTokens || 0).toLocaleString();
-      document.getElementById('maxWindowDisplay').innerText = currentWindow.toLocaleString();
-
-      // Ratio bar
-      const totalPrompt = data.totalPromptTokens || 1;
-      const cachePct = ((data.cacheTokens || 0) / totalPrompt) * 100;
-      const inputPct = ((data.inputTokens || 0) / totalPrompt) * 100;
-      document.getElementById('barCachePart').style.width = `${cachePct}%`;
-      document.getElementById('barInputPart').style.width = `${inputPct}%`;
-      document.getElementById('legendCache').innerText = formatNumber(data.cacheTokens || 0);
-      document.getElementById('legendInput').innerText = formatNumber(data.inputTokens || 0);
-
-      // 3. Stat Tiles (统计详情卡片 · 主 Agent vs 全量汇总)
-      const statsBadge = document.getElementById('statsSubCountBadge');
-      if (statsBadge) statsBadge.innerText = subList.length;
-
-      // Update Main View Tiles (Cache, 累计Token, TPS, TTFT)
-      document.getElementById('cardHitRate').innerText = `${data.sessionCacheHitRate || data.cacheHitRate || 0}%`;
-      const stepHitText = data.stepCacheHitRate !== undefined
-        ? (data.stepCacheHitRate === 0 ? '最新步: 0% (冷预填充)' : `最新步: ${data.stepCacheHitRate}%`)
-        : '';
-      const subEl = document.getElementById('cardHitRateSub');
-      if (subEl) subEl.innerText = `累计命中: ${formatNumber(data.sessionCacheTokens || 0)} tok · ${stepHitText}`;
-
-      document.getElementById('cardTotalTok').innerText = formatNumber(data.sessionTotalTokens || data.totalTokens || 0);
-      const sessBreakEl = document.getElementById('cardSessionThinkBreakdown');
-      if (sessBreakEl) {
-        sessBreakEl.innerText = `🧠 思考: ${formatNumber(data.sessionThinkingTokens || 0)} · 💬 正文: ${formatNumber(data.sessionResponseTokens || 0)}`;
-      }
-
-      const tpsVal = data.tps || data.tokPerSec || 0;
-      const cardTpsEl = document.getElementById('cardTps');
-      if (cardTpsEl) cardTpsEl.innerText = `${tpsVal} tok/s`;
-      const cardTpsSubEl = document.getElementById('cardTpsSub');
-      if (cardTpsSubEl) {
-        const rTps = data.recentTps || tpsVal;
-        const pTps = data.peakTps || tpsVal;
-        cardTpsSubEl.innerText = `近期: ${rTps} tok/s · 峰值: ${pTps} tok/s`;
-      }
-
-      const ttftVal = data.ttft > 0 ? `${data.ttft}s` : '--';
-      const cardTtftEl = document.getElementById('cardTtft');
-      if (cardTtftEl) cardTtftEl.innerText = ttftVal;
-      const cardTtftSubEl = document.getElementById('cardTtftSub');
-      if (cardTtftSubEl) {
-        const rTtft = data.recentTtft > 0 ? `${data.recentTtft}s` : '--';
-        const uTtft = data.userTtft > 0 ? `${data.userTtft}s` : '--';
-        cardTtftSubEl.innerText = `近期: ${rTtft} · 用户响应: ${uTtft}`;
-      }
-
-      // Update All View Tiles (综合 Cache, 全量累计Token, 综合 TPS, 综合平均 TTFT)
-      document.getElementById('cardAllHitRate').innerText = `${summary.combinedCacheHitRate || data.cacheHitRate || 0}%`;
-      const allHitSubEl = document.getElementById('cardAllHitRateSub');
-      if (allHitSubEl) {
-        allHitSubEl.innerText = `全量命中: ${formatNumber(summary.combinedCacheTokens || data.sessionCacheTokens || 0)} tok · 含全部 Subagents`;
-      }
-
-      document.getElementById('cardAllTotalTok').innerText = formatNumber(summary.combinedSessionTokens || data.sessionTotalTokens || 0);
-      const allOutBreakEl = document.getElementById('cardAllOutputBreakdown');
-      if (allOutBreakEl) {
-        allOutBreakEl.innerText = `🧠 思考: ${formatNumber(summary.combinedThinkingTokens || data.sessionThinkingTokens || 0)} · 💬 正文: ${formatNumber(summary.combinedResponseTokens || data.sessionResponseTokens || 0)}`;
-      }
-
-      const allTpsVal = summary.combinedTps || summary.combinedTokPerSec || data.tps || data.tokPerSec || 0;
-      const cardAllTpsEl = document.getElementById('cardAllTps');
-      if (cardAllTpsEl) cardAllTpsEl.innerText = `${allTpsVal} tok/s`;
-      const cardAllTpsSubEl = document.getElementById('cardAllTpsSub');
-      if (cardAllTpsSubEl) {
-        cardAllTpsSubEl.innerText = `主 Agent + ${summary.subagentsCount || subList.length} 个 Subagents 协同速率`;
-      }
-
-      const allTtftVal = (summary.combinedTtft > 0 ? `${summary.combinedTtft}s` : (data.ttft > 0 ? `${data.ttft}s` : '--'));
-      const cardAllTtftEl = document.getElementById('cardAllTtft');
-      if (cardAllTtftEl) cardAllTtftEl.innerText = allTtftVal;
-      const cardAllTtftSubEl = document.getElementById('cardAllTtftSub');
-      if (cardAllTtftSubEl) {
-        cardAllTtftSubEl.innerText = `集群多 Agent 平均首 Token 响应延迟`;
-      }
-
-      // Toggle View based on statsTab
-      const mainView = document.getElementById('statsMainView');
-      const allView = document.getElementById('statsAllView');
-      if (statsTab === 'all') {
-        if (mainView) mainView.style.display = 'none';
-        if (allView) allView.style.display = 'grid';
-      } else {
-        if (mainView) mainView.style.display = 'grid';
-        if (allView) allView.style.display = 'none';
-      }
-
-      if (data.conversationId) {
-        document.getElementById('convIdShort').innerText = data.conversationId.slice(0, 8);
-      }
-
-      // 4. Subagents Execution Panel
-      const subHeaderBadge = document.getElementById('subagentsHeaderBadge');
-      if (subHeaderBadge) subHeaderBadge.innerText = `${subList.length} 个子智能体`;
-
-      const subContainer = document.getElementById('subagentsContent');
-      if (subContainer) {
-        if (subList && subList.length > 0) {
-          // Two-tier sort: RUNNING subagents first, then DONE/STOPPED, preserving intrinsic order within tier
-          const sortedSubList = subList.slice();
-          sortedSubList.forEach((item, idx) => { item._order = idx; });
-          sortedSubList.sort((a, b) => {
-            const getPriority = (s) => (s === 'RUNNING' ? 0 : (s === 'DONE' ? 1 : 2));
-            const pDiff = getPriority(a.status) - getPriority(b.status);
-            if (pDiff !== 0) return pDiff;
-            if (a.spawnStepIndex !== undefined && b.spawnStepIndex !== undefined && a.spawnStepIndex !== b.spawnStepIndex) {
-              return a.spawnStepIndex - b.spawnStepIndex;
-            }
-            return (a._order || 0) - (b._order || 0);
-          });
-
-          let html = '<div class="subagent-list">';
-          for (const sa of sortedSubList) {
-            let statusClass = 'done';
-            let statusText = 'DONE';
-            let cardExtraClass = '';
-            if (sa.status === 'RUNNING') {
-              statusClass = 'running';
-              statusText = 'RUNNING';
-              cardExtraClass = 'running';
-            } else if (sa.status === 'STOPPED') {
-              statusClass = 'stopped';
-              statusText = 'STOPPED';
-            }
-
-            html += `
-              <div class="subagent-card ${cardExtraClass}">
-                <div class="subagent-header">
-                  <div class="subagent-title">
-                    <span>🤖 ${escapeHtml(sa.role || 'Subagent Worker')}</span>
-                    <span class="type-tag">${escapeHtml(sa.typeName || 'subagent')}</span>
-                    <span class="model-tag model-${escapeHtml(sa.modelKey || 'flash')}">${escapeHtml(sa.modelBadge || sa.model || '⚡ Flash')}</span>
-                  </div>
-                  <span class="status-tag ${statusClass}">${statusText}</span>
-                </div>
-                <div class="subagent-metrics">
-                  <div class="subagent-metric-item">
-                    <span class="metric-lbl">执行步骤</span>
-                    <span class="metric-val">${sa.steps || 0} steps</span>
-                  </div>
-                  <div class="subagent-metric-item">
-                    <span class="metric-lbl">活跃 Prompt</span>
-                    <span class="metric-val">${formatNumber(sa.totalPromptTokens || 0)}</span>
-                  </div>
-                  <div class="subagent-metric-item">
-                    <span class="metric-lbl">Cache 命中率</span>
-                    <span class="metric-val" style="color:var(--accent-green)">${sa.cacheHitRate || 0}%</span>
-                  </div>
-                  <div class="subagent-metric-item">
-                    <span class="metric-lbl">思考/正文</span>
-                    <span class="metric-val" style="color:#c0caf5">🧠${formatNumber(sa.sessionThinkingTokens || 0)}/💬${formatNumber(sa.sessionResponseTokens || 0)}</span>
-                  </div>
-                  <div class="subagent-metric-item">
-                    <span class="metric-lbl">生成速度 · TTFT</span>
-                    <span class="metric-val" style="color:var(--accent-purple)">${(sa.tps || sa.tokPerSec) > 0 ? (sa.tps || sa.tokPerSec) + ' tok/s' : '--'}${sa.ttft > 0 ? ` <span style="font-size:10px;color:var(--accent-blue)">(${sa.ttft}s)</span>` : ''}</span>
-                  </div>
-                  <div class="subagent-metric-item">
-                    <span class="metric-lbl">累计 Token</span>
-                    <span class="metric-val">${formatNumber(sa.sessionTotalTokens || sa.totalTokens || 0)}</span>
-                  </div>
-                </div>
-                <div class="subagent-meta">
-                  <span>UUID: ${sa.id.slice(0, 8)}...${sa.id.slice(-4)}</span>
-                  <span>模型层级: <strong style="color:#c0caf5">${escapeHtml(sa.modelBadge || sa.model || '⚡ Flash')}</strong>${sa.modelDesc ? ` <span style="color:var(--text-muted);font-size:10px">(${escapeHtml(sa.modelDesc)})</span>` : ''}</span>
-                  <span>独立沙箱上下文 · 隔离执行</span>
-                </div>
-              </div>
-            `;
-          }
-          html += '</div>';
-          subContainer.innerHTML = html;
-        } else {
-          subContainer.innerHTML = `
-            <div class="subagent-empty">
-              <div class="subagent-empty-icon">🛡️</div>
-              <div class="subagent-empty-title">当前会话未唤起 Subagent</div>
-              <div class="subagent-empty-desc">
-                所有任务均在主 Agent 上下文中完成。当执行深度调研或代码重构唤起 <code>invoke_subagent</code> 时，各 Subagent 的独立 Token 消耗、执行步数与 Cache 命中率将在此自动实时呈现。
-              </div>
-            </div>
-          `;
-        }
-      }
-
-      // 5. Context Breakdown Map & List (CLI /context 同款)
-      if (data.breakdown) {
-        const b = data.breakdown;
-        const total = data.totalPromptTokens || 1;
-        const max = data.maxWindow || currentWindow || 256000;
-        const pct = ((total / max) * 100).toFixed(1);
-
-        const badge = document.getElementById('breakdownModelBadge');
-        if (badge) badge.innerText = `${formatNumber(total)} / ${formatNumber(max)} (${pct}%)`;
-
-        const dotVal = max / 200;
-        const matrixTitleEl = document.getElementById('matrixTitle');
-        if (matrixTitleEl) {
-          matrixTitleEl.innerText = `Context Usage Map (点阵图 · 200格 · 每格 ${formatNumber(Math.round(dotVal))} tok / 0.5%)`;
-        }
-
-        const userPct = ((b.userMessages / max) * 100).toFixed(1);
-        const agentPct = ((b.agentResponses / max) * 100).toFixed(1);
-        const toolPct = ((b.toolCalls / max) * 100).toFixed(1);
-        const sysPromptPct = ((b.systemPrompt / max) * 100).toFixed(1);
-        const sysToolsPct = ((b.systemTools / max) * 100).toFixed(1);
-        const skillsPct = ((b.skills / max) * 100).toFixed(1);
-        const subagentsPct = ((b.subagents / max) * 100).toFixed(1);
-        const freePct = ((b.freeSpace / max) * 100).toFixed(1);
-
-        const catUser = document.getElementById('catUser');
-        if (catUser) catUser.innerText = `${formatNumber(b.userMessages)} tokens (${userPct}%)`;
-        const catAgent = document.getElementById('catAgent');
-        if (catAgent) catAgent.innerText = `${formatNumber(b.agentResponses)} tokens (${agentPct}%)`;
-        const catTools = document.getElementById('catTools');
-        if (catTools) catTools.innerText = `${formatNumber(b.toolCalls)} tokens (${toolPct}%)`;
-        const catSysPrompt = document.getElementById('catSysPrompt');
-        if (catSysPrompt) catSysPrompt.innerText = `${formatNumber(b.systemPrompt)} tokens (${sysPromptPct}%)`;
-        const catSysTools = document.getElementById('catSysTools');
-        if (catSysTools) catSysTools.innerText = `${formatNumber(b.systemTools)} tokens (${sysToolsPct}%)`;
-        const catSkills = document.getElementById('catSkills');
-        if (catSkills) catSkills.innerText = `${formatNumber(b.skills)} tokens (${skillsPct}%)`;
-        const catSubagents = document.getElementById('catSubagents');
-        if (catSubagents) catSubagents.innerText = `${formatNumber(b.subagents)} tokens (${subagentsPct}%)`;
-        const catFree = document.getElementById('catFree');
-        if (catFree) catFree.innerText = `${formatNumber(b.freeSpace)} (${freePct}%)`;
-
-        // Render 200 dots (each dot is 0.5% = max / 200)
-        const dotsUser = Math.round(b.userMessages / dotVal);
-        const dotsAgent = Math.round(b.agentResponses / dotVal);
-        const dotsTools = Math.round(b.toolCalls / dotVal);
-        const dotsSysPrompt = Math.max(1, Math.round(b.systemPrompt / dotVal));
-        const dotsSysTools = Math.max(1, Math.round(b.systemTools / dotVal));
-        const dotsSkills = Math.round(b.skills / dotVal);
-        const dotsSub = Math.round(b.subagents / dotVal);
-
-        const dotTypes = [];
-        for (let i = 0; i < dotsUser; i++) dotTypes.push({ color: '#7aa2f7', title: `User messages: ${formatNumber(b.userMessages)}` });
-        for (let i = 0; i < dotsAgent; i++) dotTypes.push({ color: '#9ece6a', title: `Agent responses: ${formatNumber(b.agentResponses)}` });
-        for (let i = 0; i < dotsTools; i++) dotTypes.push({ color: '#e0af68', title: `Tool calls & outputs: ${formatNumber(b.toolCalls)}` });
-        for (let i = 0; i < dotsSysPrompt; i++) dotTypes.push({ color: '#bb9af7', title: `System prompt: ${formatNumber(b.systemPrompt)}` });
-        for (let i = 0; i < dotsSysTools; i++) dotTypes.push({ color: '#7dcfff', title: `System tools: ${formatNumber(b.systemTools)}` });
-        for (let i = 0; i < dotsSkills; i++) dotTypes.push({ color: '#f7768e', title: `Skills: ${formatNumber(b.skills)}` });
-        for (let i = 0; i < dotsSub; i++) dotTypes.push({ color: '#ff9e64', title: `Subagents: ${formatNumber(b.subagents)}` });
-
-        const matrixEl = document.getElementById('dotMatrix');
-        if (matrixEl) {
-          let html = '';
-          for (let i = 0; i < 200; i++) {
-            if (i < dotTypes.length) {
-              const dt = dotTypes[i];
-              html += `<div class="dot-square" style="background:${dt.color}" title="${dt.title}"></div>`;
-            } else {
-              html += `<div class="dot-square" style="background:#20222e;border:1px solid #2d3040" title="Free space"></div>`;
-            }
-          }
-          matrixEl.innerHTML = html;
-        }
-      }
-
-      // 6. History Table
-      const historyBody = document.getElementById('historyBody');
-      if (data.history && data.history.length > 0) {
-        const rows = data.history.slice().reverse().map(item => {
-          const startTimeStr = formatTime(item.startTime || item.time);
-          const finishTimeStr = formatTime(item.finishTime);
-          let timeCell = '';
-          if (startTimeStr && finishTimeStr) {
-            const dur = (item.durationSec != null && item.durationSec >= 0) ? `${item.durationSec}s` : '';
-            timeCell = `
-              <div style="display:flex;flex-direction:column;gap:1px;" title="开始: ${item.startTime || ''}&#10;完成: ${item.finishTime || ''}">
-                <span style="color:#c0caf5;font-family:monospace;font-size:11px;white-space:nowrap;">${startTimeStr} → ${finishTimeStr}</span>
-                ${dur ? `<span style="color:var(--text-muted);font-size:9.5px;">耗时 ${dur}</span>` : ''}
-              </div>
-            `;
-          } else if (item.isToolRunning) {
-            const tName = item.runningToolName ? ` (${escapeHtml(item.runningToolName)})` : '';
-            timeCell = `
-              <div style="display:flex;flex-direction:column;gap:1px;" title="开始: ${item.startTime || ''}">
-                <span style="color:#c0caf5;font-family:monospace;font-size:11px;white-space:nowrap;">${startTimeStr} → 执行中</span>
-                <span style="color:var(--accent-blue);font-size:9.5px;">⚙️ 工具运行中${tName}...</span>
-              </div>
-            `;
-          } else if (startTimeStr) {
-            timeCell = `
-              <div style="display:flex;flex-direction:column;gap:1px;" title="开始: ${item.startTime || ''}">
-                <span style="color:#c0caf5;font-family:monospace;font-size:11px;white-space:nowrap;">${startTimeStr} → 已完成</span>
-                <span style="color:var(--accent-green);font-size:9.5px;">已完成</span>
-              </div>
-            `;
-          } else {
-            timeCell = `<span style="color:var(--text-muted);font-size:11px;">--</span>`;
-          }
-
-          const hitBadge = item.isCacheHit
-            ? `<span style="background:rgba(82,183,136,0.15);color:var(--accent-green);border:1px solid rgba(82,183,136,0.3);padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;">🟢 HIT</span>`
-            : `<span style="background:rgba(142,146,166,0.15);color:#8a8f98;border:1px solid rgba(142,146,166,0.25);padding:1px 5px;border-radius:3px;font-size:10px;font-weight:500;">⚪ MISS</span>`;
-          const cacheCell = `
-            <div style="display:flex;align-items:center;gap:6px;">
-              ${hitBadge}
-              <span style="color:${item.isCacheHit ? 'var(--accent-green)' : '#8a8f98'};font-weight:500;">${item.cacheHitRate}%</span>
-              <span style="color:var(--text-muted);font-size:10px;">(${formatNumber(item.cache || 0)})</span>
-            </div>
-          `;
-
-          const thinkTok = item.thinking || 0;
-          const respTok = item.response || 0;
-          const outputCell = `
-            <div style="display:flex;flex-direction:column;gap:1px;">
-              <span style="color:#c0caf5;font-weight:600;font-family:monospace;">${(item.output || 0).toLocaleString()}</span>
-              <span style="color:var(--text-muted);font-size:9.5px;" title="思考: ${thinkTok} tok · 正文: ${respTok} tok">🧠 ${formatNumber(thinkTok)} · 💬 ${formatNumber(respTok)}</span>
-            </div>
-          `;
-
-          return `
-            <tr>
-              <td><span class="step-badge">#${item.step}</span></td>
-              <td>${timeCell}</td>
-              <td><strong>${(item.totalPrompt || 0).toLocaleString()}</strong></td>
-              <td>${cacheCell}</td>
-              <td>${outputCell}</td>
-            </tr>
-          `;
-        }).join('');
-        historyBody.innerHTML = rows;
-      } else {
-        historyBody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:12px;color:#666">暂无历史记录</td></tr>';
-      }
-    }
-
-    // Stats tab switching (Inside 统计详情)
-    document.getElementById('tabStatsMain').addEventListener('click', () => {
-      statsTab = 'main';
-      document.getElementById('tabStatsMain').classList.add('active');
-      document.getElementById('tabStatsAll').classList.remove('active');
-      if (lastData) updateUI(lastData);
-    });
-
-    document.getElementById('tabStatsAll').addEventListener('click', () => {
-      statsTab = 'all';
-      document.getElementById('tabStatsAll').classList.add('active');
-      document.getElementById('tabStatsMain').classList.remove('active');
-      if (lastData) updateUI(lastData);
-    });
-
-
-    document.getElementById('refreshBtn').addEventListener('click', () => {
-      const btn = document.getElementById('refreshBtn');
-      btn.classList.add('spin-anim');
-      setTimeout(() => btn.classList.remove('spin-anim'), 600);
-      fetchStats();
-    });
-
-    // Start auto polling
-    fetchStats();
-    timer = setInterval(fetchStats, 1500);
-  </script>
+  <!-- INLINE_SCRIPT -->
 </body>
 </html>

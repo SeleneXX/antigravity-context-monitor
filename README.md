@@ -11,7 +11,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Antigravity-Plugin-6366f1?style=flat-square&logo=google" alt="Antigravity Plugin">
-  <img src="https://img.shields.io/badge/Version-1.0.0-emerald?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/Version-1.1.0-emerald?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/Node.js-%3E%3D18-blue?style=flat-square&logo=node.js" alt="Node.js">
   <img src="https://img.shields.io/badge/License-MIT-amber?style=flat-square" alt="License">
 </p>
@@ -125,6 +125,12 @@ context-monitor/
 │   ├── logo.svg                # 插件矢量图标
 │   ├── preview-overview.jpg    # 仪表盘总览截图
 │   └── preview-breakdown.jpg   # 上下文细分截图
+├── core/                       # 统一共享解析引擎（Sidecar 与 CLI 共用）
+│   ├── constants.mjs           # 模型压缩阈值、价格表与系统开销常量
+│   ├── models.mjs              # 会话模型探测与子智能体层级映射
+│   ├── transcript.mjs          # 单遍高性能日志解析与 mtime 内存缓存
+│   ├── subagents.mjs           # 子智能体发现与时序状态机（含后台任务等待追踪）
+│   └── analyzer.mjs            # 会话监控快照统一聚合出口
 ├── rules/
 │   └── AGENTS.md               # 上下文健康感知与智能提示规则
 ├── skills/
@@ -135,9 +141,12 @@ context-monitor/
 └── sidecars/
     └── monitor/
         ├── sidecar.json        # 侧边栏扩展配置定义
+        ├── hot-loader.mjs      # ESM 模块零停机热重载钩子
         ├── server.mjs          # 本地轻量 Web & 数据服务
         └── public/
-            └── index.html      # 侧边栏交互看板前端界面
+            ├── index.html      # 仪表盘 HTML 骨架
+            ├── styles.css      # 仪表盘样式系统
+            └── app.js          # 前端渲染与热更新同步逻辑
 ```
 
 ---
