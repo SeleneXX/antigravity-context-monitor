@@ -12,6 +12,8 @@ import {
   getModelMaxWindow,
   calcEstimatedCost,
   getDefaultCliModel,
+  readConversationDbModel,
+  classifyCacheHit,
 } from './models.mjs';
 
 const UUID_REGEX_GLOBAL = /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi;
@@ -83,8 +85,9 @@ function parseTranscriptFromDisk(logPath, stat) {
     } catch {}
   }
 
-  let currentModel = getDefaultCliModel();
+  let currentModel = readConversationDbModel(convId)?.displayName || getDefaultCliModel();
   let explicitModelSelected = false;
+  let inExecutionMode = false;
 
   let turns = 0;
   let steps = 0;
@@ -119,6 +122,7 @@ function parseTranscriptFromDisk(logPath, stat) {
     dispatchesBySubId: new Map(),
     repliesBySubId: new Map(),
     killsBySubId: new Map(),
+    swarmModelsByName: new Map(), // Swarm 成员名 -> model id
     globalKillTimeMs: 0,
   };
 
@@ -141,6 +145,9 @@ function parseTranscriptFromDisk(logPath, stat) {
   let bgTaskStartedAfterReply = false;
   let waitingForChildSubagent = false;
   let interruptedByRestart = false;
+  let errorMessage = '';
+  let pendingHasSwarmWait = false;
+  let pendingBatchRemaining = 0;
   let lastStepTimeMs = cycleStartTimeMs;
 
   for (let i = 0; i < items.length; i++) {
@@ -155,17 +162,23 @@ function parseTranscriptFromDisk(logPath, stat) {
 
     const textContent = typeof item.content === 'string' ? item.content : '';
 
-    // 1. 处理模型切换标记
-    if (textContent.includes('Model Selection')) {
+    // 1. 处理模型切换标记与 Orchestrator Plan / Execution 切换提示（仅采信系统/用户输入步骤，避免代码或命令输出误匹配）
+    const isSystemOrUser = item.type === 'USER_INPUT' || item.type === 'SYSTEM_MESSAGE';
+    if (isSystemOrUser && textContent.includes('USER_SETTINGS_CHANGE') && textContent.includes('Model Selection')) {
       const m = textContent.match(MODEL_SELECTION_REGEX);
       if (m && m[1]) {
         currentModel = m[1].replace(/\.+$/, '').trim();
         explicitModelSelected = true;
       }
     }
+    if (isSystemOrUser && textContent.includes('Plan mode is off: this turn runs on the execution model')) {
+      inExecutionMode = true;
+    } else if (isSystemOrUser && textContent.includes('Plan mode is on')) {
+      inExecutionMode = false;
+    }
 
-    // 2. 父会话接收到的消息与重启通知索引
-    if (textContent) {
+    // 2. 父会话接收到的消息与重启通知索引（仅采信 SYSTEM_MESSAGE，防止读取其他会话日志造成串台）
+    if (item.type === 'SYSTEM_MESSAGE' && textContent) {
       const senderMatch = textContent.match(SENDER_UUID_REGEX);
       if (senderMatch && senderMatch[1] && senderMatch[1] !== convId && !senderMatch[2]) {
         const sid = senderMatch[1];
@@ -192,6 +205,9 @@ function parseTranscriptFromDisk(logPath, stat) {
     if (item.type === 'USER_INPUT') {
       turns++;
       activeUserChars += textContent.length;
+      pendingHasSwarmWait = false;
+      pendingBatchRemaining = 0;
+      errorMessage = '';
 
       // 用户消息到下一条 PLANNER_RESPONSE 的首字延迟
       if (nextItem && nextItem.type === 'PLANNER_RESPONSE' && itemTimeMs > 0 && nextItem.created_at) {
@@ -201,6 +217,9 @@ function parseTranscriptFromDisk(logPath, stat) {
         }
       }
     } else if (item.type === 'SYSTEM_MESSAGE') {
+      pendingHasSwarmWait = false;
+      pendingBatchRemaining = 0;
+      errorMessage = '';
       if (textContent.includes('All your subagents and background tasks have been stopped')) {
         activeBgTasks.clear();
         waitingForChildSubagent = false;
@@ -235,6 +254,9 @@ function parseTranscriptFromDisk(logPath, stat) {
     } else if (item.type === 'CHECKPOINT') {
       // 上下文压缩检查点：重置当前活跃窗口字符统计基线，并标记子代理处于压缩恢复态
       pendingCheckpoint = true;
+      pendingHasSwarmWait = false;
+      pendingBatchRemaining = 0;
+      errorMessage = '';
       if (item.input_tokens || item.cache_read_tokens) {
         const cpPrompt = (item.input_tokens || 0) + (item.cache_read_tokens || 0);
         if (cpPrompt > lastPromptBeforeDrop) lastPromptBeforeDrop = cpPrompt;
@@ -245,14 +267,19 @@ function parseTranscriptFromDisk(logPath, stat) {
       interruptedByRestart = false;
       cycleState = 'COMPACTING';
     } else if (item.type === 'ERROR_MESSAGE') {
+      pendingHasSwarmWait = false;
+      pendingBatchRemaining = 0;
       if (textContent.includes('Please continue the task')) {
         cycleState = 'WORKING';
+        errorMessage = '';
       } else {
         cycleState = 'ERROR_HALTED';
+        errorMessage = textContent.trim().slice(0, 120);
       }
     } else if (item.type === 'GENERIC') {
       activeToolChars += textContent.length;
       interruptedByRestart = false;
+      if (pendingBatchRemaining > 0) pendingBatchRemaining--;
 
       // 捕获异步后台任务启动（如编译、自动化测试、长耗时脚本）
       const bgMatch = textContent.match(BG_TASK_START_REGEX);
@@ -267,15 +294,22 @@ function parseTranscriptFromDisk(logPath, stat) {
         bgTaskStartedAfterReply = false;
       }
 
-      // 若是最后一步且刚启动后台任务，标记等待后台任务；否则等待模型下一轮推理
+      // 判定当前等待态：后台任务 > Swarm 看板挂起 (swarm_wait DONE) > 等待模型下一轮推理
       if (item.status === 'RUNNING' && !nextItem) {
         cycleState = 'WAITING_BG_TASK';
+      } else if (
+        pendingHasSwarmWait &&
+        item.status === 'DONE' &&
+        (pendingBatchRemaining === 0 || textContent.includes('Waiting for a message'))
+      ) {
+        cycleState = 'WAITING_BOARD';
       } else {
         cycleState = 'AWAITING_MODEL';
       }
     } else if (item.type === 'PLANNER_RESPONSE') {
       latestPlanner = item;
       interruptedByRestart = false;
+      errorMessage = '';
 
       const cLen = textContent.length;
       const tLen = (item.thinking || '').length;
@@ -286,10 +320,14 @@ function parseTranscriptFromDisk(logPath, stat) {
       const output = item.output_tokens || 0;
       const prompt = input + cache;
 
+      const stepPricingModel =
+        inExecutionMode && String(currentModel).toLowerCase().includes('orchestrator')
+          ? 'gemini-flash'
+          : currentModel;
       sessionInputTokens += input;
       sessionCacheTokens += cache;
       sessionOutputTokens += output;
-      sessionCost += calcEstimatedCost(input, cache, output, currentModel);
+      sessionCost += calcEstimatedCost(input, cache, output, stepPricingModel);
 
       // 估算本步思考与正文输出比例
       const thinkEst = estimateTokensFromText(item.thinking || '');
@@ -331,6 +369,8 @@ function parseTranscriptFromDisk(logPath, stat) {
 
       // 解析工具调用（维护父子通信索引与子代理状态流转）
       const toolCalls = Array.isArray(item.tool_calls) ? item.tool_calls : [];
+      pendingHasSwarmWait = toolCalls.some((tc) => tc?.name === 'swarm_wait');
+      pendingBatchRemaining = toolCalls.length;
       const hasInvokeCall = toolCalls.some((tc) => tc?.name === 'invoke_subagent');
       const stepReturnedUuids = [];
       if (hasInvokeCall) {
@@ -435,6 +475,23 @@ function parseTranscriptFromDisk(logPath, stat) {
           }
         } else if (tc.name === 'schedule') {
           bgTaskStartedAfterReply = true;
+        } else if (tc.name === 'swarm') {
+          const action = String(args.action || args.Action || '').toLowerCase();
+          const mName = cleanStr(args.name || args.Name);
+          const mModel = cleanStr(args.model || args.Model);
+          if ((action === 'add' || action === 'model') && mName && mModel) {
+            if (action === 'add' && Array.isArray(args.tasks) && args.tasks.length > 0) {
+              for (let ti = 0; ti < args.tasks.length; ti++) {
+                parentIndex.swarmModelsByName.set(`${mName}-${ti + 1}`, mModel);
+              }
+            } else if (action === 'add' && Number(args.n) > 1) {
+              for (let ti = 1; ti <= Number(args.n); ti++) {
+                parentIndex.swarmModelsByName.set(`${mName}-${ti}`, mModel);
+              }
+            } else {
+              parentIndex.swarmModelsByName.set(mName, mModel);
+            }
+          }
         }
       }
 
@@ -487,6 +544,7 @@ function parseTranscriptFromDisk(logPath, stat) {
       }
 
       const hitRate = prompt > 0 ? (cache / prompt) * 100 : 0;
+      const roundedHitRate = Math.round(hitRate * 10) / 10;
       plannerHistory.push({
         step: item.step_index || 0,
         startTime: item.created_at || '',
@@ -504,7 +562,8 @@ function parseTranscriptFromDisk(logPath, stat) {
         isCacheHit: cache > 0,
         tokensSaved: cache,
         totalPrompt: prompt,
-        cacheHitRate: Math.round(hitRate * 10) / 10,
+        cacheHitRate: roundedHitRate,
+        cacheGrade: classifyCacheHit(roundedHitRate, cache),
         model: currentModel,
       });
     }
@@ -552,6 +611,8 @@ function parseTranscriptFromDisk(logPath, stat) {
     bgTaskStartedAfterReply,
     waitingForChildSubagent,
     interruptedByRestart,
+    errorMessage,
+    inExecutionMode,
     activeBgTaskLogs: Array.from(activeBgTasks.values()).map((t) => t.logFile),
     firstPromptSnippet: typeof firstItem?.content === 'string' ? firstItem.content : '',
   };
@@ -591,7 +652,10 @@ function parseTranscriptFromDisk(logPath, stat) {
  * 基于缓存的静态解析结果与实时时钟（Date.now()）生成最终输出对象
  */
 function buildFinalStats(cached, logMtimeMs, maxWindowOverride = 0) {
-  const detectedModel = cached.explicitModelSelected ? cached.parsedModel : getDefaultCliModel();
+  const dbFallbackModel = readConversationDbModel(cached.convId)?.displayName || '';
+  const detectedModel = cached.explicitModelSelected
+    ? cached.parsedModel
+    : dbFallbackModel || getDefaultCliModel();
 
   if (!cached.latestPlanner) {
     const fallbackWindow = maxWindowOverride > 0 ? maxWindowOverride : getModelMaxWindow(detectedModel, 0);
@@ -617,6 +681,8 @@ function buildFinalStats(cached, logMtimeMs, maxWindowOverride = 0) {
       cacheHitRate: 0,
       sessionCacheHitRate: 0,
       stepCacheHitRate: 0,
+      sessionCacheGrade: classifyCacheHit(0, 0),
+      stepCacheGrade: classifyCacheHit(0, 0),
       contextPercent: 0,
       tokPerSec: 0,
       tps: 0,
@@ -756,6 +822,8 @@ function buildFinalStats(cached, logMtimeMs, maxWindowOverride = 0) {
   };
 
   const tokPerSec = cached.tps || cached.recentTps || 0;
+  const roundedSessionHitRate = Math.round(sessionCacheHitRate * 10) / 10;
+  const roundedStepHitRate = Math.round(stepCacheHitRate * 10) / 10;
 
   return {
     turns: cached.turns,
@@ -772,9 +840,11 @@ function buildFinalStats(cached, logMtimeMs, maxWindowOverride = 0) {
     sessionThinkingTokens: cached.sessionThinkingTokens,
     sessionResponseTokens: cached.sessionResponseTokens,
     totalTokens: totalPrompt + output,
-    cacheHitRate: Math.round(sessionCacheHitRate * 10) / 10,
-    sessionCacheHitRate: Math.round(sessionCacheHitRate * 10) / 10,
-    stepCacheHitRate: Math.round(stepCacheHitRate * 10) / 10,
+    cacheHitRate: roundedSessionHitRate,
+    sessionCacheHitRate: roundedSessionHitRate,
+    stepCacheHitRate: roundedStepHitRate,
+    sessionCacheGrade: classifyCacheHit(roundedSessionHitRate, cached.sessionCacheTokens),
+    stepCacheGrade: classifyCacheHit(roundedStepHitRate, cache),
     sessionInputTokens: cached.sessionInputTokens,
     sessionCacheTokens: cached.sessionCacheTokens,
     sessionOutputTokens: cached.sessionOutputTokens,

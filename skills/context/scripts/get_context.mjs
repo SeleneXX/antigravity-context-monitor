@@ -23,6 +23,8 @@ const {
   totalPromptTokens: prompt,
   sessionCacheHitRate: sessionHit,
   stepCacheHitRate: stepHit,
+  sessionCacheGrade,
+  stepCacheGrade,
   contextPercent: pct,
   tps,
   ttft,
@@ -37,9 +39,11 @@ let colorIcon = '🟢';
 if (pct > 80) colorIcon = '🔴';
 else if (pct > 50) colorIcon = '🟡';
 
-const stepHitSuffix = !stepHit ? ' (冷启动/新前缀)' : ` (本步 ${stepHit}%)`;
+const sessEmoji = sessionCacheGrade?.emoji || '💾';
+const stepEmoji = stepCacheGrade?.emoji || '⚪';
+const stepHitSuffix = !stepHit ? ` (${stepEmoji} 冷启动/未命中)` : ` (本步 ${stepEmoji} ${stepHit}%)`;
 console.log(
-  `⏱️ **${turns} turns · ${steps} steps** | 💾 **${formatNumber(prompt)} tok · Cache hit ${sessionHit}%**${stepHitSuffix} | ${colorIcon} **${pct}%** (${formatNumber(prompt)} / ${formatNumber(maxWindow)})`
+  `⏱️ **${turns} turns · ${steps} steps** | ${sessEmoji} **${formatNumber(prompt)} tok · Cache hit ${sessionHit}%**${stepHitSuffix} | ${colorIcon} **${pct}%** (${formatNumber(prompt)} / ${formatNumber(maxWindow)})`
 );
 
 const tpsTtftStr = tps > 0 ? ` | ⚡ **TPS**: ${tps} tok/s · **TTFT**: ${ttft > 0 ? ttft + 's' : '--'}` : '';
@@ -71,18 +75,26 @@ if (b) {
 }
 
 if (subagents.length > 0) {
-  console.log(`\n**🤖 Subagents 集群详情 (${subagents.length} 个子智能体):**`);
+  console.log(`\n**🤖 Subagents / Swarm 集群详情 (${subagents.length} 个成员):**`);
   for (const sa of subagents) {
-    const detailSuffix = sa.status === 'RUNNING' && sa.statusDetail ? ` · ${sa.statusDetail}` : '';
+    const detailSuffix = sa.statusDetail ? ` · ${sa.statusDetail}` : '';
     const statusTag =
       sa.status === 'RUNNING'
         ? `🔄 RUNNING${detailSuffix}`
-        : sa.status === 'DONE'
-          ? '✅ DONE'
-          : '⏹️ STOPPED';
+        : sa.status === 'WAITING'
+          ? `💤 WAITING${detailSuffix}`
+          : sa.status === 'DONE'
+            ? '✅ DONE'
+            : `⏹️ STOPPED${detailSuffix}`;
     const speedStr = sa.tokPerSec > 0 ? ` | ${sa.tokPerSec} tok/s` : '';
+    const subCacheEmoji = sa.cacheGrade?.emoji || '';
+    const rawTier = (sa.rawModel || '').toLowerCase().replace('-', '_');
+    const isTierModel = ['inherit', 'flash_lite', 'flash', 'pro'].includes(rawTier);
+    const modelStr =
+      isTierModel && sa.resolvedModelName ? `${sa.modelBadge} → ${sa.resolvedModelName}` : sa.modelBadge;
+    const wsStr = sa.workspaceMode && sa.workspaceMode !== 'inherit' ? ` · ws:${sa.workspaceMode}` : '';
     console.log(
-      `  • ${sa.role} [${sa.typeName} · ${sa.modelBadge}] (${statusTag}): ${sa.steps} steps${speedStr} | ${formatNumber(sa.totalPromptTokens)} prompt | Cache hit ${sa.cacheHitRate}% | 总吞吐 ${formatNumber(sa.sessionTotalTokens)} tok`
+      `  • ${sa.role} [${sa.typeName} · ${modelStr}${wsStr}] (${statusTag}): ${sa.steps} steps${speedStr} | ${formatNumber(sa.totalPromptTokens)} prompt | Cache hit ${subCacheEmoji ? subCacheEmoji + ' ' : ''}${sa.cacheHitRate}% | 总吞吐 ${formatNumber(sa.sessionTotalTokens)} tok`
     );
   }
 } else {

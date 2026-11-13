@@ -1,9 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 import { BRAIN_DIR, DEFAULT_MAX_WINDOW } from './constants.mjs';
-import { clearModelCache } from './models.mjs';
+import { clearModelCache, classifyCacheHit } from './models.mjs';
 import { parseTranscript, clearTranscriptCache } from './transcript.mjs';
-import { getSubagentsForConversation, clearSubagentCache } from './subagents.mjs';
+import { getSubagentsForConversation, readSwarmContext, clearSubagentCache } from './subagents.mjs';
 
 let cachedConvs = null;
 let lastConvsFetchTime = 0;
@@ -136,6 +136,8 @@ export function getSessionSnapshot({
       maxWindow: fallbackMax,
       totalPromptTokens: 0,
       cacheHitRate: 0,
+      sessionCacheGrade: classifyCacheHit(0, 0),
+      stepCacheGrade: classifyCacheHit(0, 0),
       contextPercent: 0,
       subagents: [],
       allAgentsSummary: {
@@ -149,6 +151,7 @@ export function getSessionSnapshot({
         combinedSessionTokens: 0,
         combinedCacheTokens: 0,
         combinedCacheHitRate: 0,
+        combinedCacheGrade: classifyCacheHit(0, 0),
         combinedContextPercent: 0,
         combinedTokPerSec: 0,
         combinedTps: 0,
@@ -226,6 +229,7 @@ export function getSessionSnapshot({
     combinedSessionTokens,
     combinedCacheTokens: combinedCacheTotal,
     combinedCacheHitRate,
+    combinedCacheGrade: classifyCacheHit(combinedCacheHitRate, combinedCacheTotal),
     combinedContextPercent,
     combinedTokPerSec: combinedTps,
     combinedTps,
@@ -233,6 +237,20 @@ export function getSessionSnapshot({
     combinedCompactions,
     combinedReclaimedTokens,
   };
+
+  const swarmCtx = readSwarmContext(target.id);
+  const swarmWorkers = subagents.filter((sa) => sa.isSwarm);
+  const swarmInfo =
+    swarmCtx.totalWorkers > 0 || swarmWorkers.length > 0
+      ? {
+          title: swarmCtx.title || '',
+          totalWorkers: swarmWorkers.length,
+          running: swarmWorkers.filter((s) => s.status === 'RUNNING').length,
+          waiting: swarmWorkers.filter((s) => s.status === 'WAITING').length,
+          done: swarmWorkers.filter((s) => s.status === 'DONE').length,
+          stopped: swarmWorkers.filter((s) => s.status === 'STOPPED').length,
+        }
+      : null;
 
   // 移除内部私有索引字段后再序列化输出
   const { _parentIndex, _lifecycle, _logMtimeMs, ...publicStats } = stats;
@@ -243,6 +261,7 @@ export function getSessionSnapshot({
     ...publicStats,
     maxWindow: activeMaxWindow,
     subagents,
+    swarmInfo,
     allAgentsSummary,
   };
 }

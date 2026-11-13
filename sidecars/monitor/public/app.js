@@ -35,6 +35,36 @@
       .replace(/"/g, '&quot;');
   }
 
+  const CACHE_TIER_CLASSES = [
+    'cache-tier-miss',
+    'cache-tier-critical',
+    'cache-tier-low',
+    'cache-tier-moderate',
+    'cache-tier-good',
+    'cache-tier-optimal',
+  ];
+
+  // 与后端 core/models.mjs 保持严格一致的六档缓存命中率分级（优先使用后端下发的 cacheGrade）
+  function getCacheTier(ratePercent, cacheTokens = null, serverGrade = null) {
+    if (serverGrade && serverGrade.key) {
+      return serverGrade;
+    }
+    const rate = Number(ratePercent) || 0;
+    const isZero = cacheTokens !== null && cacheTokens !== undefined ? cacheTokens <= 0 : rate <= 0;
+    if (isZero || rate <= 0) return { key: 'miss', label: '未命中', range: '0%' };
+    if (rate < 40) return { key: 'critical', label: '极低', range: '0~40%' };
+    if (rate < 60) return { key: 'low', label: '偏低', range: '40~60%' };
+    if (rate < 80) return { key: 'moderate', label: '一般', range: '60~80%' };
+    if (rate < 95) return { key: 'good', label: '良好', range: '80~95%' };
+    return { key: 'optimal', label: '极佳', range: '95%+' };
+  }
+
+  function applyCacheTierClass(el, tier) {
+    if (!el || !tier) return;
+    el.classList.remove(...CACHE_TIER_CLASSES);
+    el.classList.add(`cache-tier-${tier.key}`);
+  }
+
   function getQueryContext() {
     const params = new URLSearchParams(window.location.search);
     return {
@@ -107,10 +137,16 @@
     const currentSpeed = data.tps || data.tokPerSec || 0;
     document.getElementById('barSpeed').textContent = currentSpeed > 0 ? currentSpeed : '--';
     document.getElementById('barTotalTokens').textContent = formatNumber(data.totalPromptTokens || 0);
-    document.getElementById('barCacheHit').textContent = `${data.sessionCacheHitRate ?? data.cacheHitRate ?? 0}%`;
+
+    const sessionRate = data.sessionCacheHitRate ?? data.cacheHitRate ?? 0;
+    const sessionTier = getCacheTier(sessionRate, data.sessionCacheTokens, data.sessionCacheGrade);
+    const barHitEl = document.getElementById('barCacheHit');
+    barHitEl.textContent = `${sessionRate}%`;
+    applyCacheTierClass(barHitEl, sessionTier);
+
     document.getElementById('barPercent').textContent = `${data.contextPercent || 0}%`;
 
-    const hitTitle = `【主 Agent】当前活跃 Prompt: ${formatNumber(data.totalPromptTokens || 0)} tok | 安全阈值: ${formatNumber(currentWindow)} | 会话累计吞吐: ${formatNumber(data.sessionTotalTokens || 0)} tok`;
+    const hitTitle = `【主 Agent】累计缓存分级: ${sessionTier.label} (${sessionTier.range}) | 当前活跃 Prompt: ${formatNumber(data.totalPromptTokens || 0)} tok | 安全阈值: ${formatNumber(currentWindow)} | 会话累计吞吐: ${formatNumber(data.sessionTotalTokens || 0)} tok`;
     document.getElementById('barCacheStat')?.setAttribute('title', hitTitle);
 
     const miniCircum = 56.54;
@@ -168,15 +204,24 @@
       document.getElementById('convIdShort').textContent = data.conversationId.slice(0, 8);
     }
 
-    // 主 Agent 视图
-    document.getElementById('cardHitRate').textContent = `${data.sessionCacheHitRate ?? data.cacheHitRate ?? 0}%`;
-    const stepHitText =
-      data.stepCacheHitRate !== undefined
-        ? data.stepCacheHitRate === 0
-          ? '最新步: 0% (冷预填充)'
-          : `最新步: ${data.stepCacheHitRate}%`
-        : '';
-    document.getElementById('cardHitRateSub').textContent = `累计命中: ${formatNumber(data.sessionCacheTokens || 0)} tok · ${stepHitText}`;
+    // 主 Agent 视图（累计命中率 + 最新单步命中率同步六档着色）
+    const sessionRate = data.sessionCacheHitRate ?? data.cacheHitRate ?? 0;
+    const sessionTier = getCacheTier(sessionRate, data.sessionCacheTokens, data.sessionCacheGrade);
+    const cardHitEl = document.getElementById('cardHitRate');
+    cardHitEl.textContent = `${sessionRate}%`;
+    applyCacheTierClass(cardHitEl, sessionTier);
+    cardHitEl.setAttribute('title', `累计缓存分级: ${sessionTier.label} (${sessionTier.range})`);
+
+    let stepHitHtml = '';
+    if (data.stepCacheHitRate !== undefined) {
+      const stepTier = getCacheTier(data.stepCacheHitRate, data.cacheTokens, data.stepCacheGrade);
+      const stepLabel =
+        stepTier.key === 'miss'
+          ? '0% (冷预填充)'
+          : `${data.stepCacheHitRate}%`;
+      stepHitHtml = ` · 最新步: <span class="cache-tier-${stepTier.key}" style="font-weight:600" title="最新单步分级: ${stepTier.label} (${stepTier.range})">${stepLabel}</span>`;
+    }
+    document.getElementById('cardHitRateSub').innerHTML = `累计命中: ${formatNumber(data.sessionCacheTokens || 0)} tok${stepHitHtml}`;
 
     document.getElementById('cardTotalTok').textContent = formatNumber(data.sessionTotalTokens || data.totalTokens || 0);
     document.getElementById('cardSessionThinkBreakdown').textContent = `🧠 思考: ${formatNumber(data.sessionThinkingTokens || 0)} · 💬 正文: ${formatNumber(data.sessionResponseTokens || 0)}`;
@@ -191,8 +236,14 @@
     document.getElementById('cardTtftSub').textContent = `近期: ${rTtft} · 用户响应: ${uTtft}`;
 
     // 全量汇总视图
-    document.getElementById('cardAllHitRate').textContent = `${summary.combinedCacheHitRate ?? data.cacheHitRate ?? 0}%`;
-    document.getElementById('cardAllHitRateSub').textContent = `全量命中: ${formatNumber(summary.combinedCacheTokens || data.sessionCacheTokens || 0)} tok · 含全部 Subagents`;
+    const allRate = summary.combinedCacheHitRate ?? data.cacheHitRate ?? 0;
+    const allCacheTok = summary.combinedCacheTokens ?? data.sessionCacheTokens ?? 0;
+    const allTier = getCacheTier(allRate, allCacheTok, summary.combinedCacheGrade);
+    const cardAllHitEl = document.getElementById('cardAllHitRate');
+    cardAllHitEl.textContent = `${allRate}%`;
+    applyCacheTierClass(cardAllHitEl, allTier);
+    cardAllHitEl.setAttribute('title', `全量综合缓存分级: ${allTier.label} (${allTier.range})`);
+    document.getElementById('cardAllHitRateSub').textContent = `全量命中: ${formatNumber(allCacheTok)} tok · 含全部 Subagents`;
     document.getElementById('cardAllTotalTok').textContent = formatNumber(summary.combinedSessionTokens || data.sessionTotalTokens || 0);
     document.getElementById('cardAllOutputBreakdown').textContent = `🧠 思考: ${formatNumber(summary.combinedThinkingTokens || data.sessionThinkingTokens || 0)} · 💬 正文: ${formatNumber(summary.combinedResponseTokens || data.sessionResponseTokens || 0)}`;
 
@@ -209,23 +260,30 @@
 
   function renderSubagents(subList) {
     const runningCount = subList.filter((s) => s.status === 'RUNNING').length;
+    const waitingCount = subList.filter((s) => s.status === 'WAITING').length;
     const headerBadge = document.getElementById('subagentsHeaderBadge');
+    const stateNotes = [];
+    if (runningCount > 0) stateNotes.push(`${runningCount} 运行中`);
+    if (waitingCount > 0) stateNotes.push(`${waitingCount} 待命`);
     headerBadge.textContent =
-      runningCount > 0 ? `${subList.length} 个子智能体 (${runningCount} 运行中)` : `${subList.length} 个子智能体`;
+      stateNotes.length > 0 ? `${subList.length} 个子智能体 (${stateNotes.join(' · ')})` : `${subList.length} 个子智能体`;
 
     const container = document.getElementById('subagentsContent');
     if (!subList || subList.length === 0) {
       container.innerHTML = `
         <div class="subagent-empty">
           <div class="subagent-empty-icon">🛡️</div>
-          <div class="subagent-empty-title">当前会话未唤起 Subagent</div>
+          <div class="subagent-empty-title">当前会话未唤起 Subagent / Swarm</div>
           <div class="subagent-empty-desc">
-            所有任务均在主 Agent 上下文中完成。当唤起 <code>invoke_subagent</code> 时，各子智能体的独立 Token 消耗、后台任务等待态与 Cache 命中率将在此实时呈现。
+            所有任务均在主 Agent 上下文中完成。当唤起 <code>invoke_subagent</code> 或启用 <code>Swarm Mode</code> 时，各子智能体与 Worker 的独立 Token 消耗、看板待命态与真实模型层级将在此实时呈现。
           </div>
         </div>
       `;
       return;
     }
+
+    // 保持滚动条纵向位置，避免 1.5 秒定时轮询重绘导致滚动跳回顶部
+    const prevScrollTop = container.scrollTop;
 
     const cardsHtml = subList
       .map((sa) => {
@@ -236,21 +294,31 @@
           statusClass = 'running';
           statusText = sa.statusDetail ? `RUNNING · ${sa.statusDetail}` : 'RUNNING';
           cardExtraClass = 'running';
+        } else if (sa.status === 'WAITING') {
+          statusClass = 'waiting';
+          statusText = sa.statusDetail ? `WAITING · ${sa.statusDetail}` : 'WAITING · 看板待命';
         } else if (sa.status === 'STOPPED') {
           statusClass = 'stopped';
-          statusText = 'STOPPED';
+          statusText = sa.statusDetail && sa.statusDetail !== '已中止' ? `STOPPED · ${sa.statusDetail}` : 'STOPPED';
         }
 
         const speedVal = sa.tps || sa.tokPerSec || 0;
         const speedHtml = speedVal > 0 ? `${speedVal} tok/s` : '--';
         const ttftHtml = sa.ttft > 0 ? ` <span style="font-size:10px;color:var(--accent-blue)">(${sa.ttft}s)</span>` : '';
+        const saRate = sa.cacheHitRate || 0;
+        const saTier = getCacheTier(saRate, sa.sessionCacheTokens, sa.cacheGrade);
+        const wsTagHtml =
+          sa.workspaceMode && sa.workspaceMode !== 'inherit'
+            ? `<span class="workspace-tag">${escapeHtml(sa.workspaceMode)}</span>`
+            : '';
 
         return `
           <div class="subagent-card ${cardExtraClass}">
             <div class="subagent-header">
               <div class="subagent-title">
-                <span>🤖 ${escapeHtml(sa.role || 'Subagent Worker')}</span>
+                <span>${sa.isSwarm ? '🐝' : '🤖'} ${escapeHtml(sa.role || 'Subagent Worker')}</span>
                 <span class="type-tag">${escapeHtml(sa.typeName || 'subagent')}</span>
+                ${wsTagHtml}
                 <span class="model-tag model-${escapeHtml(sa.modelKey || 'flash')}">${escapeHtml(sa.modelBadge || sa.model || '⚡ Flash')}</span>
               </div>
               <span class="status-tag ${statusClass}">${escapeHtml(statusText)}</span>
@@ -264,9 +332,9 @@
                 <span class="metric-lbl">活跃 Prompt</span>
                 <span class="metric-val">${formatNumber(sa.totalPromptTokens || 0)}</span>
               </div>
-              <div class="subagent-metric-item">
+              <div class="subagent-metric-item" title="缓存分级: ${escapeHtml(saTier.label)} (${escapeHtml(saTier.range)}) · 累计命中 ${formatNumber(sa.sessionCacheTokens || 0)} tok">
                 <span class="metric-lbl">Cache 命中率</span>
-                <span class="metric-val" style="color:var(--accent-green)">${sa.cacheHitRate || 0}%</span>
+                <span class="metric-val cache-tier-${saTier.key}">${saRate}%</span>
               </div>
               <div class="subagent-metric-item">
                 <span class="metric-lbl">思考 / 正文</span>
@@ -291,6 +359,7 @@
       .join('');
 
     container.innerHTML = `<div class="subagent-list">${cardsHtml}</div>`;
+    container.scrollTop = prevScrollTop;
   }
 
   function renderBreakdown(data, currentWindow) {
@@ -385,9 +454,9 @@
           timeCell = `<span style="color:var(--text-muted);font-size:11px;">--</span>`;
         }
 
-        const hitBadge = item.isCacheHit
-          ? `<span style="background:rgba(82,183,136,0.15);color:var(--accent-green);border:1px solid rgba(82,183,136,0.3);padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;">🟢 HIT</span>`
-          : `<span style="background:rgba(142,146,166,0.15);color:#8a8f98;border:1px solid rgba(142,146,166,0.25);padding:1px 5px;border-radius:3px;font-size:10px;font-weight:500;">⚪ MISS</span>`;
+        const tier = getCacheTier(item.cacheHitRate, item.cache, item.cacheGrade);
+        const tierTip = `缓存分级: ${escapeHtml(tier.label)} (${escapeHtml(tier.range)}) · 命中 ${formatNumber(item.cache || 0)} / 新输入 ${formatNumber(item.input || 0)}`;
+        const hitBadge = `<span class="cache-badge cache-tier-${tier.key}" title="${tierTip}"><span class="cache-badge-dot"></span>${tier.key === 'miss' ? 'MISS' : 'HIT'}</span>`;
 
         const thinkTok = item.thinking || 0;
         const respTok = item.response || 0;
@@ -398,9 +467,9 @@
             <td>${timeCell}</td>
             <td><strong>${(item.totalPrompt || 0).toLocaleString()}</strong></td>
             <td>
-              <div style="display:flex;align-items:center;gap:6px;">
+              <div style="display:flex;align-items:center;gap:6px;" title="${tierTip}">
                 ${hitBadge}
-                <span style="color:${item.isCacheHit ? 'var(--accent-green)' : '#8a8f98'};font-weight:500;">${item.cacheHitRate}%</span>
+                <span class="cache-tier-${tier.key}" style="font-weight:600;">${item.cacheHitRate}%</span>
                 <span style="color:var(--text-muted);font-size:10px;">(${formatNumber(item.cache || 0)})</span>
               </div>
             </td>

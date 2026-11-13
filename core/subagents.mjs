@@ -1,7 +1,12 @@
 import fs from 'fs';
 import path from 'path';
 import { BRAIN_DIR, DEFAULT_MAX_WINDOW } from './constants.mjs';
-import { detectConversationModel, formatSubagentModelInfo } from './models.mjs';
+import {
+  detectConversationModel,
+  formatSubagentModelInfo,
+  readConversationDbModel,
+  classifyCacheHit,
+} from './models.mjs';
 import { parseTranscript } from './transcript.mjs';
 
 const UUID_REGEX_GLOBAL = /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi;
@@ -11,6 +16,59 @@ const fullInvokeCache = new Map();
 
 export function clearSubagentCache() {
   fullInvokeCache.clear();
+}
+
+/**
+ * 读取 Antigravity Swarm 成员注册表与集群元信息 (.system_generated/swarm)
+ */
+export function readSwarmContext(mainConvId) {
+  const empty = { title: '', membersById: new Map(), membersByName: new Map(), totalWorkers: 0 };
+  if (!mainConvId) return empty;
+  const swarmDir = path.join(BRAIN_DIR, mainConvId, '.system_generated', 'swarm');
+  const membersPath = path.join(swarmDir, 'members.json');
+  if (!fs.existsSync(membersPath)) return empty;
+
+  try {
+    const stat = fs.statSync(membersPath);
+    const data = JSON.parse(fs.readFileSync(membersPath, 'utf8'));
+    let title = data?.title || '';
+    if (!title) {
+      const swarmJsonPath = path.join(swarmDir, 'swarm.json');
+      if (fs.existsSync(swarmJsonPath)) {
+        try {
+          title = JSON.parse(fs.readFileSync(swarmJsonPath, 'utf8'))?.title || '';
+        } catch {}
+      }
+    }
+
+    const membersObj = data?.members && typeof data.members === 'object' ? data.members : {};
+    const membersById = new Map();
+    const membersByName = new Map();
+    let totalWorkers = 0;
+
+    for (const [memberName, m] of Object.entries(membersObj)) {
+      if (!m || typeof m !== 'object') continue;
+      const cid = m.conversation_id || '';
+      const meta = {
+        memberName,
+        conversationId: cid,
+        swarmRole: m.role || (memberName === 'coordinator' ? 'coordinator' : 'worker'),
+        model: m.model || m.applied_model || m.desired_model || '',
+        workspaceMode: m.workspace_mode || 'inherit',
+        killed: Boolean(m.killed),
+        phase: m.phase || '',
+        wakeMode: m.wake_mode || '',
+        mtimeMs: stat.mtimeMs,
+      };
+      membersByName.set(memberName, meta);
+      if (cid) membersById.set(cid, meta);
+      if (memberName !== 'coordinator' && cid !== mainConvId) totalWorkers++;
+    }
+
+    return { title, membersById, membersByName, totalWorkers };
+  } catch {
+    return empty;
+  }
 }
 
 function getFullInvokeCalls(convId, force = false) {
@@ -86,7 +144,8 @@ export function evaluateSubagentLiveStatus({
   parentIndex,
 }) {
   const now = Date.now();
-  const descriptorKilled = descriptor?.state === 'SUBAGENT_STATE_KILLED';
+  const swarmKilled = Boolean(descriptor?.swarmMeta?.killed);
+  const descriptorKilled = descriptor?.state === 'SUBAGENT_STATE_KILLED' || swarmKilled;
   const parentDispatchMs = parentIndex?.dispatchesBySubId?.get(subId) || 0;
   const parentReplyMs = parentIndex?.repliesBySubId?.get(subId) || 0;
   const parentKillMs = Math.max(
@@ -97,7 +156,7 @@ export function evaluateSubagentLiveStatus({
   // 情况 1：子代理已被创建，但 transcript.jsonl 尚未刷盘落盘（刚被 invoke_subagent 唤起的前几秒）
   if (!subStats || !subStats._lifecycle) {
     if (descriptorKilled) {
-      return { status: 'STOPPED', statusDetail: '已终止' };
+      return { status: 'STOPPED', statusDetail: swarmKilled ? '已移除' : '已终止' };
     }
     const spawnAnchorMs = descriptor?.mtimeMs || descriptor?.spawnTimeMs || 0;
     if (spawnAnchorMs > 0 && now - spawnAnchorMs < 180_000 && parentKillMs <= spawnAnchorMs) {
@@ -140,7 +199,18 @@ export function evaluateSubagentLiveStatus({
     if (lc.cycleState === 'TURN_CONCLUDED' && parentKillMs > (lc.lastStepTimeMs || 0) + 10_000 && !descriptorKilled) {
       return { status: 'DONE', statusDetail: '已完成' };
     }
-    return { status: 'STOPPED', statusDetail: '已中止' };
+    return { status: 'STOPPED', statusDetail: swarmKilled ? '已移除' : '已中止' };
+  }
+
+  // 情况 4.5：遇到不可恢复的运行错误（如模型配额耗尽、服务异常中断）
+  if (lc.cycleState === 'ERROR_HALTED') {
+    const errLower = String(lc.errorMessage || '').toLowerCase();
+    return { status: 'STOPPED', statusDetail: errLower.includes('quota') ? '配额耗尽中止' : '异常中止' };
+  }
+
+  // 情况 4.8：Swarm Worker 调用 swarm_wait 完成本轮并在共享看板待命，等待下一条 @mention 唤醒
+  if (lc.cycleState === 'WAITING_BOARD') {
+    return { status: 'WAITING', statusDetail: '看板待命' };
   }
 
   // 情况 5：子代理主动挂起当前轮次，等待后台任务（如 C++ 编译、自动化测试）完成唤醒
@@ -204,7 +274,7 @@ export function evaluateSubagentLiveStatus({
 }
 
 /**
- * 解析单个子代理的 Role、TypeName 与真实运行模型信息
+ * 解析单个子代理 / Swarm Worker 的 Role、TypeName 与真实运行模型信息
  */
 function resolveSubagentMetadata({
   subId,
@@ -215,9 +285,14 @@ function resolveSubagentMetadata({
   parentIndex,
   force = false,
 }) {
-  let role = descriptor?.role || 'Subagent Worker';
-  let typeName = descriptor?.typeName || 'subagent';
-  let rawModel = descriptor?.model || '';
+  const swarmMeta = descriptor?.swarmMeta || null;
+  let role = descriptor?.role || (swarmMeta ? `Swarm Worker (${swarmMeta.memberName})` : 'Subagent Worker');
+  let typeName = descriptor?.typeName || (swarmMeta ? swarmMeta.swarmRole || 'worker' : 'subagent');
+  let rawModel =
+    swarmMeta?.model ||
+    (swarmMeta?.memberName ? parentIndex?.swarmModelsByName?.get(swarmMeta.memberName) : '') ||
+    descriptor?.model ||
+    '';
   const parentOwnerId = subStats?._lifecycle?.parentOwnerId || mainConvId;
 
   const tryMatchFromCalls = (calls) => {
@@ -233,8 +308,8 @@ function resolveSubagentMetadata({
     return match || null;
   };
 
-  // 先查内存中的主会话单遍索引
-  if (!rawModel || rawModel === 'inherit' || role === 'Subagent Worker') {
+  // 非 Swarm Worker 时优先从主会话 invoke_subagent 调用中反查参数
+  if (!swarmMeta && (!rawModel || rawModel === 'inherit' || role === 'Subagent Worker')) {
     let matched = tryMatchFromCalls(parentIndex?.invokeCalls || []);
     // 若 compact 日志因超长 Prompt 截断了 tool_calls，再按需回查 transcript_full.jsonl
     if (!matched || !matched.model) {
@@ -248,19 +323,33 @@ function resolveSubagentMetadata({
     }
   }
 
-  // browser 子代理未显式传模型时平台默认使用 flash，其余默认继承主会话
+  // 查询 SQLite 会话库中的实际推理模型展示名（同时覆盖 invoke_subagent 真实映射模型与 Swarm Worker 默认模型）
+  const dbModelInfo = readConversationDbModel(subId);
+  const resolvedDisplayName = dbModelInfo?.displayName || '';
+
+  // browser 子代理未显式传模型时平台默认使用 flash；Swarm Worker 若未指定具体模型且已从 DB 探明模型则直接使用实际模型
   if (!rawModel) {
-    rawModel = typeName === 'browser' ? 'flash' : 'inherit';
+    if (typeName === 'browser') {
+      rawModel = 'flash';
+    } else if (swarmMeta && resolvedDisplayName) {
+      rawModel = resolvedDisplayName;
+    } else {
+      rawModel = 'inherit';
+    }
   }
 
   const parentEffectiveModel =
     parentOwnerId === mainConvId ? mainModel : detectConversationModel(parentOwnerId);
-  const modelInfo = formatSubagentModelInfo(rawModel, parentEffectiveModel);
+  const modelInfo = formatSubagentModelInfo(rawModel, parentEffectiveModel, resolvedDisplayName);
 
   return {
     role,
     typeName,
     ...modelInfo,
+    resolvedModelName: resolvedDisplayName,
+    isSwarm: Boolean(swarmMeta),
+    swarmMemberName: swarmMeta?.memberName || '',
+    workspaceMode: swarmMeta?.workspaceMode || '',
     parentId: parentOwnerId,
   };
 }
@@ -279,7 +368,8 @@ export function getSubagentsForConversation(mainConvId, mainStats, { maxWindowOv
   };
   const mainModel = mainStats?.detectedModel || mainStats?.model || '';
 
-  // 合并权威描述符目录 (.system_generated/subagents) 与主会话日志发现的 UUID
+  // 合并权威描述符目录 (.system_generated/subagents)、Swarm 成员表 (.system_generated/swarm/members.json) 与主会话日志 UUID
+  const swarmCtx = readSwarmContext(mainConvId);
   const subagentsMap = new Map();
   const subDir = path.join(BRAIN_DIR, mainConvId, '.system_generated', 'subagents');
   if (fs.existsSync(subDir)) {
@@ -292,20 +382,38 @@ export function getSubagentsForConversation(mainConvId, mainStats, { maxWindowOv
           const sd = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
           const sid = sd.conversationId || f.replace(/\.json$/i, '');
           if (sid) {
+            const sm = swarmCtx.membersById.get(sid) || null;
             subagentsMap.set(sid, {
               id: sid,
-              role: sd.subagentDescriptor?.role || 'Subagent Worker',
-              typeName: sd.subagentDescriptor?.typeName || 'subagent',
-              model: sd.subagentDescriptor?.model || '',
-              state: sd.state || 'SUBAGENT_STATE_ALIVE',
+              role: sd.subagentDescriptor?.role || (sm ? `Swarm Worker (${sm.memberName})` : 'Subagent Worker'),
+              typeName: sd.subagentDescriptor?.typeName || (sm ? sm.swarmRole || 'worker' : 'subagent'),
+              model: sd.subagentDescriptor?.model || sm?.model || '',
+              state: sm?.killed ? 'SUBAGENT_STATE_KILLED' : sd.state || 'SUBAGENT_STATE_ALIVE',
               spawnStepIndex: sd.spawnStepIndex || 0,
-              mtimeMs: stat.mtimeMs,
+              mtimeMs: Math.max(stat.mtimeMs, sm?.mtimeMs || 0),
               hasAuthoritativeDescriptor: true,
+              swarmMeta: sm,
             });
           }
         } catch {}
       }
     } catch {}
+  }
+
+  for (const [sid, sm] of swarmCtx.membersById.entries()) {
+    if (sid !== mainConvId && sm.memberName !== 'coordinator' && !subagentsMap.has(sid)) {
+      subagentsMap.set(sid, {
+        id: sid,
+        role: `Swarm Worker (${sm.memberName})`,
+        typeName: sm.swarmRole || 'worker',
+        model: sm.model || '',
+        state: sm.killed ? 'SUBAGENT_STATE_KILLED' : 'SUBAGENT_STATE_ALIVE',
+        spawnStepIndex: 0,
+        mtimeMs: sm.mtimeMs || 0,
+        hasAuthoritativeDescriptor: true,
+        swarmMeta: sm,
+      });
+    }
   }
 
   for (const [sid, fallbackMeta] of parentIndex.discoveredSubIds.entries()) {
@@ -350,6 +458,10 @@ export function getSubagentsForConversation(mainConvId, mainStats, { maxWindowOv
         modelBadge: resolved.modelBadge,
         modelDesc: resolved.modelDesc,
         rawModel: resolved.rawModel,
+        resolvedModelName: resolved.resolvedModelName,
+        isSwarm: resolved.isSwarm,
+        swarmMemberName: resolved.swarmMemberName,
+        workspaceMode: resolved.workspaceMode,
         spawnStepIndex: desc.spawnStepIndex || 0,
         steps: 0,
         turns: 0,
@@ -370,6 +482,7 @@ export function getSubagentsForConversation(mainConvId, mainStats, { maxWindowOv
         sessionResponseTokens: 0,
         totalTokens: 0,
         cacheHitRate: 0,
+        cacheGrade: classifyCacheHit(0, 0),
         sessionInputTokens: 0,
         sessionCacheTokens: 0,
         sessionTotalTokens: 0,
@@ -381,8 +494,10 @@ export function getSubagentsForConversation(mainConvId, mainStats, { maxWindowOv
     const subStats = parseTranscript(subLog, { maxWindowOverride, force });
     if (!subStats) continue;
 
-    // 过滤掉正文中误匹配到的顶层独立用户会话 UUID
-    if (!desc.hasAuthoritativeDescriptor && !subStats._lifecycle?.isSubagentTranscript) {
+    // 过滤掉正文中误匹配到的顶层独立用户会话 UUID，或属于其他父会话的子代理 UUID
+    const belongsToOtherParent =
+      subStats._lifecycle?.parentOwnerId && subStats._lifecycle.parentOwnerId !== mainConvId;
+    if (!desc.hasAuthoritativeDescriptor && (!subStats._lifecycle?.isSubagentTranscript || belongsToOtherParent)) {
       continue;
     }
 
@@ -411,6 +526,10 @@ export function getSubagentsForConversation(mainConvId, mainStats, { maxWindowOv
       modelBadge: resolved.modelBadge,
       modelDesc: resolved.modelDesc,
       rawModel: resolved.rawModel,
+      resolvedModelName: resolved.resolvedModelName,
+      isSwarm: resolved.isSwarm,
+      swarmMemberName: resolved.swarmMemberName,
+      workspaceMode: resolved.workspaceMode,
       spawnStepIndex: desc.spawnStepIndex || 0,
       steps: subStats.steps,
       turns: subStats.turns,
@@ -431,6 +550,7 @@ export function getSubagentsForConversation(mainConvId, mainStats, { maxWindowOv
       sessionResponseTokens: subStats.sessionResponseTokens,
       totalTokens: subStats.totalTokens,
       cacheHitRate: subStats.cacheHitRate,
+      cacheGrade: subStats.sessionCacheGrade || classifyCacheHit(subStats.cacheHitRate, subStats.sessionCacheTokens),
       sessionInputTokens: subStats.sessionInputTokens,
       sessionCacheTokens: subStats.sessionCacheTokens,
       sessionTotalTokens: subStats.sessionTotalTokens,
@@ -438,12 +558,12 @@ export function getSubagentsForConversation(mainConvId, mainStats, { maxWindowOv
     });
   }
 
-  // 二级排序：RUNNING 置顶，其次 DONE，最后 STOPPED；同级内保持创建步序稳定不跳动
+  // 二级排序：RUNNING 置顶，其次 WAITING（看板待命），再次 DONE，最后 STOPPED；同级内保持创建步序稳定不跳动
   result.forEach((item, idx) => {
     item._order = idx;
   });
   result.sort((a, b) => {
-    const getPriority = (s) => (s === 'RUNNING' ? 0 : s === 'DONE' ? 1 : 2);
+    const getPriority = (s) => (s === 'RUNNING' ? 0 : s === 'WAITING' ? 1 : s === 'DONE' ? 2 : 3);
     const pDiff = getPriority(a.status) - getPriority(b.status);
     if (pDiff !== 0) return pDiff;
     if ((a.spawnStepIndex || 0) !== (b.spawnStepIndex || 0)) {

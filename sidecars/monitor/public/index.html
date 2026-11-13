@@ -43,7 +43,7 @@
         <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
         <path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/>
       </svg>
-      <span><strong id="barTotalTokens">0</strong> tok <span style="opacity:0.5;margin:0 2px">·</span> Cache hit <strong id="barCacheHit" style="color:var(--accent-green)">0%</strong></span>
+      <span><strong id="barTotalTokens">0</strong> tok <span style="opacity:0.5;margin:0 2px">·</span> Cache hit <strong id="barCacheHit" class="cache-tier-miss">0%</strong></span>
     </div>
 
     <div class="bar-divider"></div>
@@ -119,7 +119,7 @@
       <div id="statsMainView" class="stat-row">
         <div class="stat-tile">
           <div class="label">Cache 命中率 (累计)</div>
-          <div class="value" id="cardHitRate" style="color:var(--accent-green)">0%</div>
+          <div class="value cache-tier-miss" id="cardHitRate">0%</div>
           <div id="cardHitRateSub" class="stat-sub">最新步: --%</div>
         </div>
         <div class="stat-tile">
@@ -142,7 +142,7 @@
       <div id="statsAllView" class="stat-row" style="display: none;">
         <div class="stat-tile">
           <div class="label">综合 Cache 命中率</div>
-          <div class="value" id="cardAllHitRate" style="color:var(--accent-green)">0%</div>
+          <div class="value cache-tier-miss" id="cardAllHitRate">0%</div>
           <div id="cardAllHitRateSub" class="stat-sub">含全部 Subagents 累计</div>
         </div>
         <div class="stat-tile">
