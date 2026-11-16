@@ -56,10 +56,11 @@ export function getModelMaxWindow(modelName, promptTokens = 0) {
       m.includes('argon') ||
       m.includes('hydrogen') ||
       m.includes('orchestrator') ||
-      m.includes('flash') ||
-      m.includes('gemini') ||
-      m.includes('pro')
+      m.includes('gemini 4') ||
+      m.includes('gemini-4')
     ) {
+      limit = COMPACTION_THRESHOLDS.GEMINI_4;
+    } else if (m.includes('flash') || m.includes('gemini') || m.includes('pro')) {
       limit = COMPACTION_THRESHOLDS.GEMINI;
     }
   }

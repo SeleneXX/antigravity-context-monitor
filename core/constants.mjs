@@ -45,7 +45,8 @@ export const DEFAULT_MAX_WINDOW = 256000;
 // 平台自动压缩安全阈值（非物理极限窗口，而是触发自动摘要截断的实际水位线）
 export const COMPACTION_THRESHOLDS = {
   CLAUDE: 512000,   // Claude Opus / Sonnet 系列保持 512k 压缩水位
-  GEMINI: 256000,   // Gemini Carbon / Argon / Flash 系列统一按 256k 触发压缩
+  GEMINI_4: 512000, // Gemini 4 Carbon / Argon / Hydrogen 及其 Orchestrator 上下文翻倍至 512k
+  GEMINI: 256000,   // Gemini 3.8 Flash / 3.5 Flash Lite / Flash Worker 保持 256k
   GPT_OSS: 128000,  // 开源或第三方小窗口模型
 };
 

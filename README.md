@@ -35,7 +35,7 @@
 ## ✨ 核心特性
 
 - 📊 **侧边栏实时可视化看板 (Sidecar Auxiliary Pane)**:
-  - **环形水位表盘 (Donut Gauge)**：直观展示已用 Token / 安全压缩容量，自动识别当前模型并匹配平台压缩阈值（Gemini Carbon / Argon / Flash 256K、Claude Opus / Sonnet 512K，灰度突破时自动阶梯扩容）。
+  - **环形水位表盘 (Donut Gauge)**：直观展示已用 Token / 安全压缩容量，自动识别当前模型并匹配平台压缩阈值（Gemini 4 Carbon / Argon / Hydrogen 512K、Gemini 3.8 Flash 256K、Claude Opus / Sonnet 512K，灰度突破时自动阶梯扩容）。
   - **200 格点阵图 (Context Usage Matrix Map)**：精细化映射上下文构成，哪些是工具输出、哪些是历史对话、哪些是系统提示词一目了然。
   - **Token 分类深度剖析**：精确区分 `User messages`、`Agent responses`、`Tool calls & outputs`、`System prompt`、`System tools`、`Skills`、`Subagents 声明` 与 `Free space`。
   - **性能实时指标**：实时计算推理 TPS (tok/s)、首字响应延迟 (TTFT)、Prompt Cache 累计与最新单步命中率。
