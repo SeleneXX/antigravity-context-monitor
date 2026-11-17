@@ -73,32 +73,129 @@ export function getModelMaxWindow(modelName, promptTokens = 0) {
   return limit;
 }
 
-export function getModelPricing(modelName) {
-  if (!modelName) return PRICING_TABLE['gemini-flash'];
+export function getModelPricingTier(modelName) {
+  if (!modelName) return 'gemini-flash';
   const m = String(modelName).toLowerCase();
-  if (m.includes('flash-lite') || m.includes('flash_lite')) return PRICING_TABLE['gemini-flash-lite'];
-  if (m.includes('flash')) return PRICING_TABLE['gemini-flash'];
-  if (m.includes('opus')) return PRICING_TABLE['claude-opus'];
-  if (m.includes('sonnet') || m.includes('claude')) return PRICING_TABLE['claude-sonnet'];
-  if (m.includes('oss') || m.includes('gpt')) return PRICING_TABLE['gpt-oss'];
-  if (
-    m.includes('carbon') ||
-    m.includes('argon') ||
-    m.includes('hydrogen') ||
-    m.includes('orchestrator') ||
-    m.includes('pro') ||
-    m.includes('gemini 4') ||
-    m.includes('gemini-4')
-  ) {
-    return PRICING_TABLE['gemini-pro'];
+  // 先判定 Hydrogen / 调度执行 worker，防止名称中的 flash 或 orchestrator 被误归到 3.8 Flash 或 Carbon
+  if (m.includes('hydrogen') || m.includes('gemini-flash-worker-agy')) return 'gemini-4-hydrogen';
+  if (m.includes('carbon') || m.includes('argon') || m.includes('orchestrator') || m.includes('gemini 4') || m.includes('gemini-4')) {
+    return 'gemini-4-carbon';
   }
-  return PRICING_TABLE['gemini-flash'];
+  if (m.includes('flash-lite') || m.includes('flash_lite') || m.includes('flash lite')) return 'gemini-flash-lite';
+  if (m.includes('flash')) return 'gemini-flash';
+  if (m.includes('opus')) return /5[._ -]5/.test(m) ? 'claude-opus-5-5' : 'claude-opus';
+  if (m.includes('sonnet') || m.includes('claude')) return /5[._ -]5/.test(m) ? 'claude-sonnet-5-5' : 'claude-sonnet';
+  if (m.includes('oss') || m.includes('gpt')) return 'gpt-oss';
+  if (m.includes('pro')) return 'gemini-pro';
+  return 'gemini-flash';
 }
 
-export function calcEstimatedCost(inputTokens, cacheTokens, outputTokens, modelName) {
-  const p = getModelPricing(modelName);
+function getLocalTodayKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+export function getModelPricing(modelName, dateKey = '') {
+  const tier = getModelPricingTier(modelName);
+  const base = PRICING_TABLE[tier] || PRICING_TABLE['gemini-flash'];
+  if (base.nextEffectiveFrom) {
+    const refDate = dateKey && /^\d{4}-\d{2}-\d{2}/.test(dateKey) ? dateKey.slice(0, 10) : getLocalTodayKey();
+    if (refDate >= base.nextEffectiveFrom) {
+      return {
+        ...base,
+        input: base.nextInput ?? base.input,
+        output: base.nextOutput ?? base.output,
+        cacheRead: base.nextCacheRead ?? base.cacheRead,
+      };
+    }
+  }
+  return base;
+}
+
+export function calcEstimatedCost(inputTokens, cacheTokens, outputTokens, modelName, dateKey = '') {
+  const p = getModelPricing(modelName, dateKey);
   const cost = (inputTokens * p.input + cacheTokens * p.cacheRead + outputTokens * p.output) / 1_000_000;
   return Math.round(cost * 10000) / 10000;
+}
+
+/**
+ * 计算有限数值数组的中位数，用于抗单步异常波动
+ */
+export function computeMedian(values) {
+  if (!Array.isArray(values) || values.length === 0) return null;
+  const clean = values
+    .map((v) => Number(v))
+    .filter((v) => Number.isFinite(v))
+    .sort((a, b) => a - b);
+  if (clean.length === 0) return null;
+  const mid = Math.floor(clean.length / 2);
+  return clean.length % 2 === 1 ? clean[mid] : (clean[mid - 1] + clean[mid]) / 2;
+}
+
+const DISPLAY_NAME_TO_CANONICAL_ID = new Map(
+  Object.entries(SWARM_MODEL_DISPLAY_NAMES).map(([k, v]) => [v.toLowerCase(), k])
+);
+
+function formatReadableModelId(modelKey) {
+  if (!modelKey || modelKey === 'unknown') return 'Unknown Model';
+  if (SWARM_MODEL_DISPLAY_NAMES[modelKey]) return SWARM_MODEL_DISPLAY_NAMES[modelKey];
+  const parts = String(modelKey).split(/[-_]+/).filter(Boolean);
+  const effortSet = new Set(['low', 'medium', 'high', 'xhigh', 'tiered']);
+  const tokens = [];
+  let effortLabel = '';
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i].toLowerCase();
+    if (i === parts.length - 1 && effortSet.has(p)) {
+      effortLabel = p === 'xhigh' ? 'XHigh' : p.charAt(0).toUpperCase() + p.slice(1);
+    } else if (p === 'gpt' || p === 'oss') {
+      tokens.push(p.toUpperCase());
+    } else if (/^\d+(\.\d+)?$/.test(p)) {
+      tokens.push(p);
+    } else {
+      tokens.push(p.charAt(0).toUpperCase() + p.slice(1));
+    }
+  }
+  const base = tokens.join(' ').replace(/\b(\d+)\s+(\d+)\b/g, '$1.$2');
+  return effortLabel ? `${base} (${effortLabel})` : base;
+}
+
+/**
+ * 将内部模型 ID 与展示名归一化为稳定的聚合键，避免跨数据源测速与账单分裂
+ */
+export function normalizeCanonicalModel(rawModelId = '', rawDisplayName = '') {
+  const idClean = String(rawModelId || '').trim();
+  const dispClean = String(rawDisplayName || '').trim();
+  const idLower = idClean.toLowerCase().replace(/^model_/, '');
+  const dispLower = dispClean.toLowerCase();
+
+  let modelKey = '';
+  if (idLower && !idLower.startsWith('placeholder')) {
+    modelKey = idLower;
+  } else if (dispLower && DISPLAY_NAME_TO_CANONICAL_ID.has(dispLower)) {
+    modelKey = DISPLAY_NAME_TO_CANONICAL_ID.get(dispLower);
+  } else if (dispLower) {
+    modelKey = dispLower.replace(/[^a-z0-9.]+/g, '-').replace(/^-+|-+$/g, '');
+  } else {
+    modelKey = 'unknown';
+  }
+
+  // 若已知展示名反查到的标准键可用且 idClean 只是展示名格式，优先统一到标准键
+  if (!SWARM_MODEL_DISPLAY_NAMES[modelKey] && dispLower && DISPLAY_NAME_TO_CANONICAL_ID.has(dispLower)) {
+    modelKey = DISPLAY_NAME_TO_CANONICAL_ID.get(dispLower);
+  }
+
+  const displayName =
+    dispClean ||
+    SWARM_MODEL_DISPLAY_NAMES[modelKey] ||
+    SWARM_MODEL_DISPLAY_NAMES[idLower] ||
+    formatReadableModelId(modelKey);
+  const pricingTier = getModelPricingTier(`${modelKey} ${displayName}`);
+
+  return {
+    modelKey,
+    displayName,
+    pricingTier,
+  };
 }
 
 /**
@@ -106,12 +203,13 @@ export function calcEstimatedCost(inputTokens, cacheTokens, outputTokens, modelN
  */
 let cachedCliModel = null;
 let cachedCliModelTime = 0;
-const dbModelCache = new Map(); // convId -> { sig, info }
+const genMetaCache = new Map(); // `${dir}|${convId}` -> { sig, info }
+const MAX_GEN_META_CACHE = 80;
 
 export function clearModelCache() {
   cachedCliModel = null;
   cachedCliModelTime = 0;
-  dbModelCache.clear();
+  genMetaCache.clear();
 }
 
 function readVarint(buf, offset) {
@@ -143,12 +241,135 @@ function skipWireField(buf, offset, wire) {
   return buf.length;
 }
 
+function parseProtobufDuration(buf, start, end) {
+  let pos = start;
+  let seconds = 0;
+  let nanos = 0;
+  while (pos < end) {
+    const tag = readVarint(buf, pos);
+    if (!tag) break;
+    pos = tag.next;
+    const field = Math.floor(tag.value / 8);
+    const wire = tag.value & 7;
+    if (field === 1 && wire === 0) {
+      const v = readVarint(buf, pos);
+      if (!v) break;
+      seconds = v.value;
+      pos = v.next;
+    } else if (field === 2 && wire === 0) {
+      const v = readVarint(buf, pos);
+      if (!v) break;
+      nanos = v.value;
+      pos = v.next;
+    } else {
+      pos = skipWireField(buf, pos, wire);
+    }
+  }
+  const totalSec = seconds + nanos / 1e9;
+  return Number.isFinite(totalSec) && totalSec >= 0 ? totalSec : null;
+}
+
+function parseUsageSubmessage(buf, start, end) {
+  let pos = start;
+  let inputTokens = null;
+  let outputTokens = null;
+  let cacheReadTokens = null;
+  let thinkingOutputTokens = null;
+  let responseOutputTokens = null;
+  let callId = '';
+
+  while (pos < end) {
+    const tag = readVarint(buf, pos);
+    if (!tag) break;
+    pos = tag.next;
+    const field = Math.floor(tag.value / 8);
+    const wire = tag.value & 7;
+    if (wire === 0 && (field === 2 || field === 3 || field === 5 || field === 9 || field === 10)) {
+      const v = readVarint(buf, pos);
+      if (!v) break;
+      pos = v.next;
+      if (field === 2) inputTokens = v.value;
+      else if (field === 3) outputTokens = v.value;
+      else if (field === 5) cacheReadTokens = v.value;
+      else if (field === 9) thinkingOutputTokens = v.value;
+      else if (field === 10) responseOutputTokens = v.value;
+    } else if (field === 11 && wire === 2) {
+      const len = readVarint(buf, pos);
+      if (!len) break;
+      const strEnd = Math.min(end, len.next + len.value);
+      callId = buf.toString('utf8', len.next, strEnd).trim();
+      pos = strEnd;
+    } else {
+      pos = skipWireField(buf, pos, wire);
+    }
+  }
+
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    thinkingOutputTokens,
+    responseOutputTokens,
+    callId,
+  };
+}
+
+function parseChatStartMetadata(buf, start, end) {
+  let pos = start;
+  let estimatedTokensUsed = null;
+  let maxContextTokens = null;
+
+  while (pos < end) {
+    const tag = readVarint(buf, pos);
+    if (!tag) break;
+    pos = tag.next;
+    const field = Math.floor(tag.value / 8);
+    const wire = tag.value & 7;
+    if (field === 10 && wire === 2) {
+      const len = readVarint(buf, pos);
+      if (!len) break;
+      const subEnd = Math.min(end, len.next + len.value);
+      let subPos = len.next;
+      while (subPos < subEnd) {
+        const subTag = readVarint(buf, subPos);
+        if (!subTag) break;
+        subPos = subTag.next;
+        const subField = Math.floor(subTag.value / 8);
+        const subWire = subTag.value & 7;
+        if (subWire === 0 && (subField === 1 || subField === 4)) {
+          const v = readVarint(buf, subPos);
+          if (!v) break;
+          subPos = v.next;
+          if (subField === 1) estimatedTokensUsed = v.value;
+          else if (subField === 4) maxContextTokens = v.value;
+        } else {
+          subPos = skipWireField(buf, subPos, subWire);
+        }
+      }
+      pos = subEnd;
+    } else {
+      pos = skipWireField(buf, pos, wire);
+    }
+  }
+
+  return { estimatedTokensUsed, maxContextTokens };
+}
+
 /**
- * 从 gen_metadata protobuf Blob 中提取 root.1.21 (model_display_name)
+ * 解码 gen_metadata 单行 protobuf（零拷贝跳过大字段，提取步号、模型、精确 Token 拆分与 TTFT/流式耗时）
  */
-function parseGenMetadataProtobuf(buf) {
+export function parseGenMetadataRow(buf, rowIdx = 0) {
   if (!Buffer.isBuffer(buf) || buf.length === 0) return null;
+
   let pos = 0;
+  const stepIndices = [];
+  let modelId = '';
+  let displayName = '';
+  let usage = null;
+  let ctxMeta = null;
+  let ttftSec = null;
+  let streamingSec = null;
+
   while (pos < buf.length) {
     const tag = readVarint(buf, pos);
     if (!tag) break;
@@ -156,25 +377,52 @@ function parseGenMetadataProtobuf(buf) {
     const field = Math.floor(tag.value / 8);
     const wire = tag.value & 7;
 
-    if (field === 1 && wire === 2) {
+    if (field === 2 && wire === 2) {
+      const len = readVarint(buf, pos);
+      if (!len) break;
+      const end = Math.min(buf.length, len.next + len.value);
+      let p = len.next;
+      while (p < end) {
+        const v = readVarint(buf, p);
+        if (!v) break;
+        stepIndices.push(v.value);
+        p = v.next;
+      }
+      pos = end;
+    } else if (field === 2 && wire === 0) {
+      const v = readVarint(buf, pos);
+      if (!v) break;
+      stepIndices.push(v.value);
+      pos = v.next;
+    } else if (field === 1 && wire === 2) {
       const len = readVarint(buf, pos);
       if (!len) break;
       const end = Math.min(buf.length, len.next + len.value);
       let subPos = len.next;
-      let displayName = '';
       while (subPos < end) {
         const subTag = readVarint(buf, subPos);
         if (!subTag) break;
         subPos = subTag.next;
         const subField = Math.floor(subTag.value / 8);
         const subWire = subTag.value & 7;
-        if (subField === 21 && subWire === 2) {
-          const strLen = readVarint(buf, subPos);
-          if (!strLen) break;
-          const strEnd = Math.min(end, strLen.next + strLen.value);
-          displayName = buf.toString('utf8', strLen.next, strEnd).trim();
-          if (displayName) return { displayName };
-          subPos = strEnd;
+        if (subWire === 2 && (subField === 4 || subField === 9 || subField === 11 || subField === 12 || subField === 19 || subField === 21)) {
+          const sLen = readVarint(buf, subPos);
+          if (!sLen) break;
+          const sEnd = Math.min(end, sLen.next + sLen.value);
+          if (subField === 4) {
+            usage = parseUsageSubmessage(buf, sLen.next, sEnd);
+          } else if (subField === 9) {
+            ctxMeta = parseChatStartMetadata(buf, sLen.next, sEnd);
+          } else if (subField === 11) {
+            ttftSec = parseProtobufDuration(buf, sLen.next, sEnd);
+          } else if (subField === 12) {
+            streamingSec = parseProtobufDuration(buf, sLen.next, sEnd);
+          } else if (subField === 19) {
+            modelId = buf.toString('utf8', sLen.next, sEnd).trim();
+          } else if (subField === 21) {
+            displayName = buf.toString('utf8', sLen.next, sEnd).trim();
+          }
+          subPos = sEnd;
         } else {
           subPos = skipWireField(buf, subPos, subWire);
         }
@@ -184,18 +432,55 @@ function parseGenMetadataProtobuf(buf) {
       pos = skipWireField(buf, pos, wire);
     }
   }
-  return null;
+
+  let durationSec = null;
+  if (ttftSec !== null && streamingSec !== null) {
+    durationSec = ttftSec + streamingSec;
+  } else if (ttftSec !== null || streamingSec !== null) {
+    durationSec = ttftSec ?? streamingSec;
+  }
+
+  let thinkingTokens = usage?.thinkingOutputTokens ?? null;
+  let responseTokens = usage?.responseOutputTokens ?? null;
+  const outputTokens = usage?.outputTokens ?? null;
+  if (outputTokens !== null && outputTokens >= 0) {
+    if (thinkingTokens === null && responseTokens !== null) {
+      thinkingTokens = Math.max(0, outputTokens - responseTokens);
+    } else if (responseTokens === null && thinkingTokens !== null) {
+      responseTokens = Math.max(0, outputTokens - thinkingTokens);
+    }
+  }
+
+  const canonical = normalizeCanonicalModel(modelId, displayName);
+
+  return {
+    rowIdx,
+    stepIndices,
+    modelId,
+    displayName: displayName || canonical.displayName,
+    modelKey: canonical.modelKey,
+    pricingTier: canonical.pricingTier,
+    callId: usage?.callId || '',
+    inputTokens: usage?.inputTokens ?? null,
+    cacheReadTokens: usage?.cacheReadTokens ?? null,
+    outputTokens,
+    thinkingTokens,
+    responseTokens,
+    estimatedTokensUsed: ctxMeta?.estimatedTokensUsed ?? null,
+    maxContextTokens: ctxMeta?.maxContextTokens ?? null,
+    ttftSec: ttftSec !== null ? Number(ttftSec.toFixed(3)) : null,
+    streamingSec: streamingSec !== null ? Number(streamingSec.toFixed(3)) : null,
+    durationSec: durationSec !== null ? Number(durationSec.toFixed(3)) : null,
+  };
 }
 
 /**
- * 只读读取 Antigravity SQLite 会话库中的实际推理模型展示名（支持 WAL 热库并发读，无 node:sqlite 时返回 null）
+ * 构建 SQLite 数据库文件（含 WAL）变更签名，供单会话与增量账本共用
  */
-export function readConversationDbModel(convId) {
-  if (!DatabaseSync || !convId) return null;
-  const dbPath = path.join(CONVERSATIONS_DIR, `${convId}.db`);
-  if (!fs.existsSync(dbPath)) return null;
-
-  let sig = '';
+export function getConversationDbSignature(convId, conversationsDir = CONVERSATIONS_DIR) {
+  if (!convId || !conversationsDir) return '';
+  const dbPath = path.join(conversationsDir, `${convId}.db`);
+  if (!fs.existsSync(dbPath)) return '';
   try {
     const dbStat = fs.statSync(dbPath);
     let walSig = '0:0';
@@ -204,30 +489,73 @@ export function readConversationDbModel(convId) {
       const walStat = fs.statSync(walPath);
       walSig = `${walStat.mtimeMs}:${walStat.size}`;
     }
-    sig = `${dbStat.mtimeMs}:${dbStat.size}|${walSig}`;
-    const cached = dbModelCache.get(convId);
+    return `${dbStat.mtimeMs}:${dbStat.size}|${walSig}`;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 只读读取会话 SQLite gen_metadata 全量步级遥测数据（含 WAL 热库并发读，无 node:sqlite 时安全降级为 null）
+ */
+export function readConversationGenMetadata(
+  convId,
+  { conversationsDir = CONVERSATIONS_DIR, useCache = true } = {}
+) {
+  if (!DatabaseSync || !convId || !conversationsDir) return null;
+  const dbPath = path.join(conversationsDir, `${convId}.db`);
+  const sig = getConversationDbSignature(convId, conversationsDir);
+  if (!sig) return null;
+
+  const cacheKey = `${conversationsDir}|${convId}`;
+  if (useCache) {
+    const cached = genMetaCache.get(cacheKey);
     if (cached && cached.sig === sig) {
       return cached.info;
     }
-  } catch {
-    return null;
   }
 
   let db = null;
   let info = null;
   try {
     db = new DatabaseSync(dbPath, { readOnly: true });
-    const rows = db.prepare('SELECT data FROM gen_metadata ORDER BY idx DESC LIMIT 5').all();
+    const rows = db.prepare('SELECT idx, data FROM gen_metadata ORDER BY idx ASC').all();
+    const records = [];
+    const byStepIndex = new Map();
+    let latestDisplayName = '';
+    let latestModelId = '';
+    let latestMaxContextTokens = null;
+
     for (const row of rows) {
       const data = row?.data;
       if (!data) continue;
       const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
-      const parsed = parseGenMetadataProtobuf(buf);
-      if (parsed?.displayName) {
-        info = parsed;
-        break;
+      const parsed = parseGenMetadataRow(buf, row.idx);
+      if (!parsed) continue;
+      records.push(parsed);
+      for (const sIdx of parsed.stepIndices) {
+        // 按 idx 升序扫描，后续重试生成的元数据自动覆盖同 step 旧记录
+        byStepIndex.set(sIdx, parsed);
+      }
+      if (parsed.displayName && parsed.displayName !== 'Unknown Model') {
+        latestDisplayName = parsed.displayName;
+      }
+      if (parsed.modelId) {
+        latestModelId = parsed.modelId;
+      }
+      if (parsed.maxContextTokens && parsed.maxContextTokens > 0) {
+        latestMaxContextTokens = parsed.maxContextTokens;
       }
     }
+
+    info = {
+      sig,
+      records,
+      byStepIndex,
+      latestDisplayName,
+      latestModelId,
+      latestMaxContextTokens,
+    };
   } catch {
     // 忽略表不存在、并发锁冲突或损坏库，确保不影响主链路
   } finally {
@@ -238,8 +566,26 @@ export function readConversationDbModel(convId) {
     }
   }
 
-  dbModelCache.set(convId, { sig, info });
+  if (useCache) {
+    if (genMetaCache.size >= MAX_GEN_META_CACHE) {
+      const oldestKey = genMetaCache.keys().next().value;
+      genMetaCache.delete(oldestKey);
+    }
+    genMetaCache.set(cacheKey, { sig, info });
+  }
   return info;
+}
+
+/**
+ * 只读读取 Antigravity SQLite 会话库中的实际推理模型展示名
+ */
+export function readConversationDbModel(convId, options = {}) {
+  const meta = readConversationGenMetadata(convId, options);
+  if (!meta || !meta.latestDisplayName) return null;
+  return {
+    displayName: meta.latestDisplayName,
+    modelId: meta.latestModelId || '',
+  };
 }
 
 export function getDefaultCliModel(force = false) {

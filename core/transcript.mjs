@@ -2,9 +2,12 @@ import fs from 'fs';
 import path from 'path';
 import {
   BRAIN_DIR,
+  CONVERSATIONS_DIR,
+  CLI_CONVERSATIONS_DIR,
   DEFAULT_MAX_WINDOW,
   SYSTEM_BASE_TOKENS,
   SYSTEM_BASE_TOTAL,
+  SWARM_MODEL_DISPLAY_NAMES,
 } from './constants.mjs';
 import {
   MODEL_SELECTION_REGEX,
@@ -13,6 +16,9 @@ import {
   calcEstimatedCost,
   getDefaultCliModel,
   readConversationDbModel,
+  readConversationGenMetadata,
+  getConversationDbSignature,
+  computeMedian,
   classifyCacheHit,
 } from './models.mjs';
 
@@ -67,13 +73,34 @@ function extractSubagentSpecs(args) {
   return Array.isArray(subs) ? subs : [subs];
 }
 
+function resolveConversationsDirForLog(logPath, overrideDir = '') {
+  if (overrideDir) return overrideDir;
+  return /[\\/]antigravity-cli[\\/]/i.test(String(logPath || ''))
+    ? CLI_CONVERSATIONS_DIR
+    : CONVERSATIONS_DIR;
+}
+
+function formatTpsValue(val) {
+  const num = Number(val);
+  if (!Number.isFinite(num) || num <= 0) return 0;
+  return num < 10 ? Math.round(num * 10) / 10 : Math.round(num);
+}
+
+function formatTtftValue(val) {
+  const num = Number(val);
+  if (!Number.isFinite(num) || num < 0) return 0;
+  return num < 10 ? Number(num.toFixed(2)) : Number(num.toFixed(1));
+}
+
 /**
  * 单遍解析会话日志，同时构建统计指标、父会话子代理事件索引与子代理生命周期状态摘要
  */
-function parseTranscriptFromDisk(logPath, stat) {
+function parseTranscriptFromDisk(logPath, stat, conversationsDir = CONVERSATIONS_DIR) {
   const content = fs.readFileSync(logPath, 'utf8');
   const rawLines = content.split('\n');
   const convId = path.basename(path.dirname(path.dirname(path.dirname(logPath))));
+  const genMetaInfo = readConversationGenMetadata(convId, { conversationsDir });
+  const consumedGenRows = new Set();
 
   // 一次反序列化所有有效 JSON 行，自动忽略正在写入中的残缺末尾行
   const items = [];
@@ -85,13 +112,15 @@ function parseTranscriptFromDisk(logPath, stat) {
     } catch {}
   }
 
-  let currentModel = readConversationDbModel(convId)?.displayName || getDefaultCliModel();
+  let currentModel = genMetaInfo?.latestDisplayName || getDefaultCliModel();
   let explicitModelSelected = false;
   let inExecutionMode = false;
 
   let turns = 0;
   let steps = 0;
   let latestPlanner = null;
+  let latestThinkingTokens = null;
+  let latestResponseTokens = null;
   let sessionCost = 0;
   let sessionInputTokens = 0;
   let sessionCacheTokens = 0;
@@ -111,8 +140,11 @@ function parseTranscriptFromDisk(logPath, stat) {
   let activeToolChars = 0;
 
   const plannerHistory = [];
-  const tpsSamples = [];
-  const ttftSamples = [];
+  const sustainedSpeedSamples = [];
+  const shortBurstSamples = [];
+  const measuredTtftSamples = [];
+  const fallbackSpeedSamples = [];
+  const measuredUserTtftSamples = [];
   const userTtftSamples = [];
 
   // 父会话对子代理的调度事件索引（避免子代理状态判定时重复扫描主会话大文件）
@@ -320,29 +352,67 @@ function parseTranscriptFromDisk(logPath, stat) {
       const output = item.output_tokens || 0;
       const prompt = input + cache;
 
-      const stepPricingModel =
-        inExecutionMode && String(currentModel).toLowerCase().includes('orchestrator')
-          ? 'gemini-flash'
+      // 优先从 SQLite gen_metadata 匹配该步的原生遥测（真实模型、精准思考拆分与纳秒级测速）
+      let genRec = null;
+      if (genMetaInfo) {
+        const stepKey = item.step_index;
+        if (stepKey !== undefined && stepKey !== null) {
+          const byStep = genMetaInfo.byStepIndex.get(stepKey);
+          if (byStep) genRec = byStep;
+        }
+        if (!genRec && input + cache + output > 0) {
+          genRec =
+            genMetaInfo.records.find(
+              (r) =>
+                !consumedGenRows.has(r.rowIdx) &&
+                r.inputTokens === input &&
+                r.cacheReadTokens === cache &&
+                r.outputTokens === output
+            ) || null;
+        }
+        if (genRec) consumedGenRows.add(genRec.rowIdx);
+      }
+
+      const genDisplayName =
+        (genRec?.displayName && genRec.displayName !== 'Unknown Model' ? genRec.displayName : '') ||
+        (genRec?.modelId ? SWARM_MODEL_DISPLAY_NAMES[String(genRec.modelId).toLowerCase()] || genRec.modelId : '');
+      const stepModelLabel = genDisplayName || currentModel;
+      const stepPricingModel = genDisplayName
+        ? genDisplayName
+        : inExecutionMode && String(currentModel).toLowerCase().includes('orchestrator')
+          ? 'gemini-4-hydrogen'
           : currentModel;
+      const stepDateKey = typeof item.created_at === 'string' ? item.created_at.slice(0, 10) : '';
+
       sessionInputTokens += input;
       sessionCacheTokens += cache;
       sessionOutputTokens += output;
-      sessionCost += calcEstimatedCost(input, cache, output, stepPricingModel);
+      sessionCost += calcEstimatedCost(input, cache, output, stepPricingModel, stepDateKey);
 
-      // 估算本步思考与正文输出比例
-      const thinkEst = estimateTokensFromText(item.thinking || '');
-      const contentEst =
-        estimateTokensFromText(textContent) +
-        estimateTokensFromText(item.tool_calls ? JSON.stringify(item.tool_calls) : '');
+      // 优先使用 SQLite 服务端思考/正文 Token 精确值，缺失时回退文本比例估算
       let stepThinking = 0;
       let stepResponse = output;
-      if (thinkEst + contentEst > 0 && output > 0) {
-        stepThinking = Math.min(output, Math.round((thinkEst / (thinkEst + contentEst)) * output));
-        stepResponse = output - stepThinking;
-      } else if (thinkEst > 0) {
-        stepThinking = Math.min(output, thinkEst);
+      if (genRec && (genRec.thinkingTokens !== null || genRec.responseTokens !== null) && output > 0) {
+        stepThinking =
+          genRec.thinkingTokens !== null
+            ? Math.min(output, genRec.thinkingTokens)
+            : Math.max(0, output - (genRec.responseTokens || 0));
         stepResponse = Math.max(0, output - stepThinking);
+      } else {
+        const thinkEst = estimateTokensFromText(item.thinking || '');
+        const contentEst =
+          estimateTokensFromText(textContent) +
+          estimateTokensFromText(item.tool_calls ? JSON.stringify(item.tool_calls) : '');
+        if (thinkEst + contentEst > 0 && output > 0) {
+          stepThinking = Math.min(output, Math.round((thinkEst / (thinkEst + contentEst)) * output));
+          stepResponse = output - stepThinking;
+        } else if (thinkEst > 0) {
+          stepThinking = Math.min(output, thinkEst);
+          stepResponse = Math.max(0, output - stepThinking);
+        }
       }
+      latestThinkingTokens = stepThinking;
+      latestResponseTokens = stepResponse;
       sessionThinkingTokens += stepThinking;
       sessionResponseTokens += stepResponse;
 
@@ -508,37 +578,118 @@ function parseTranscriptFromDisk(logPath, stat) {
         cycleState = 'TURN_CONCLUDED';
       }
 
-      // 计算单步完成时间与解码 TPS / TTFT 样本
-      let finishTime = '';
-      let durationSec = null;
-      for (let j = i + 1; j < Math.min(items.length, i + 5); j++) {
-        const lookNext = items[j];
-        if (lookNext && lookNext.created_at && itemTimeMs > 0) {
-          const tEnd = new Date(lookNext.created_at).getTime();
-          const dur = Math.round((tEnd - itemTimeMs) / 1000);
-          if (lookNext.type === 'USER_INPUT') {
-            const estDur = Math.max(1, Math.round((output || 100) / 120));
-            durationSec = dur >= 1 && dur <= estDur * 1.5 ? dur : estDur;
-            finishTime = new Date(itemTimeMs + durationSec * 1000).toISOString();
-          } else if (dur >= 0) {
-            durationSec = dur;
-            finishTime = lookNext.created_at;
-          }
-          break;
-        }
-      }
+      // 优先提取 SQLite gen_metadata 实测速度（剥离工具等待与首字等待），缺失时回退保守时间戳估算
+      let stepStreamingTps = null;
+      let stepE2eTps = null;
+      let stepTtftSec = null;
+      let stepStreamingSec = null;
+      let stepDurationSec = null;
+      let isMeasuredSpeed = false;
 
-      if (nextItem && (nextItem.type === 'GENERIC' || nextItem.type === 'USER_INPUT')) {
+      if (genRec && (genRec.ttftSec !== null || genRec.streamingSec !== null || genRec.durationSec !== null)) {
+        const ttftVal = genRec.ttftSec !== null && genRec.ttftSec >= 0 ? genRec.ttftSec : null;
+        if (ttftVal !== null) {
+          stepTtftSec = formatTtftValue(ttftVal);
+          measuredTtftSamples.push(ttftVal);
+          if (i > 0 && items[i - 1]?.type === 'USER_INPUT') {
+            measuredUserTtftSamples.push(ttftVal);
+          }
+        }
+
+        const streamVal = genRec.streamingSec !== null && genRec.streamingSec > 0.05 ? genRec.streamingSec : null;
+        const totalGenVal = genRec.durationSec !== null && genRec.durationSec > 0.05 ? genRec.durationSec : streamVal;
+        stepStreamingSec = streamVal !== null ? Number(streamVal.toFixed(2)) : null;
+        stepDurationSec = totalGenVal !== null ? Number(totalGenVal.toFixed(2)) : null;
+        if (stepDurationSec !== null || stepTtftSec !== null) {
+          isMeasuredSpeed = true;
+        }
+
+        if (output > 0 && (streamVal !== null || totalGenVal !== null)) {
+          const rawE2eTps = totalGenVal ? output / totalGenVal : null;
+          // 过滤短结构化工具调用的网络包 flush 脉冲，避免虚高 TPS 失真
+          const isSustainedStream = Boolean(
+            streamVal !== null &&
+            streamVal >= 0.8 &&
+            output >= 40 &&
+            !(streamVal < 1.2 && (ttftVal || 0) > streamVal * 3 && output / streamVal > 500)
+          );
+
+          if (isSustainedStream) {
+            const rawStreamTps = output / streamVal;
+            if (rawStreamTps > 0 && rawStreamTps <= 2000) {
+              stepStreamingTps = Number(rawStreamTps.toFixed(1));
+              stepE2eTps = rawE2eTps ? Number(rawE2eTps.toFixed(1)) : stepStreamingTps;
+              sustainedSpeedSamples.push({
+                step: item.step_index || 0,
+                streamingTps: stepStreamingTps,
+                e2eTps: stepE2eTps,
+                ttftSec: ttftVal,
+                streamingSec: streamVal,
+                durationSec: totalGenVal || streamVal,
+                outTok: output,
+              });
+            }
+          } else if (rawE2eTps && rawE2eTps > 0 && rawE2eTps <= 2000) {
+            stepStreamingTps = Number(rawE2eTps.toFixed(1));
+            stepE2eTps = stepStreamingTps;
+            shortBurstSamples.push({
+              step: item.step_index || 0,
+              streamingTps: stepStreamingTps,
+              e2eTps: stepE2eTps,
+              ttftSec: ttftVal,
+              streamingSec: totalGenVal || streamVal,
+              durationSec: totalGenVal || streamVal,
+              outTok: output,
+            });
+          }
+        }
+      } else if (nextItem && (nextItem.type === 'GENERIC' || nextItem.type === 'USER_INPUT')) {
         if (output > 10 && itemTimeMs > 0 && nextItem.created_at) {
           const durSec = (new Date(nextItem.created_at).getTime() - itemTimeMs) / 1000;
           if (durSec >= 1 && (nextItem.type !== 'USER_INPUT' || durSec <= 15)) {
             const estTtft = Math.min(durSec * 0.65, Math.max(0.5, 0.8 + input / 4000 + cache / 80000));
             const decodeSec = Math.max(0.2, durSec - estTtft);
-            const stepTps = Math.round(output / decodeSec);
-            if (stepTps > 0 && stepTps <= 800) {
-              tpsSamples.push({ stepTps, outTok: output, durSec: decodeSec });
-              ttftSamples.push(Math.round(estTtft * 10) / 10);
+            const estStreamTps = Number((output / decodeSec).toFixed(1));
+            const estE2eTps = Number((output / durSec).toFixed(1));
+            if (estStreamTps > 0 && estStreamTps <= 800) {
+              stepStreamingTps = estStreamTps;
+              stepE2eTps = estE2eTps;
+              stepTtftSec = formatTtftValue(estTtft);
+              fallbackSpeedSamples.push({
+                step: item.step_index || 0,
+                streamingTps: estStreamTps,
+                e2eTps: estE2eTps,
+                ttftSec: estTtft,
+                streamingSec: decodeSec,
+                durationSec: durSec,
+                outTok: output,
+              });
             }
+          }
+        }
+      }
+
+      // 计算单步完成时间：优先采用服务端精确生成耗时，避免后续工具执行时间污染步耗时
+      let finishTime = '';
+      let durationSec = null;
+      if (isMeasuredSpeed && stepDurationSec !== null && itemTimeMs > 0) {
+        durationSec = Math.round(stepDurationSec * 10) / 10;
+        finishTime = new Date(itemTimeMs + stepDurationSec * 1000).toISOString();
+      } else {
+        for (let j = i + 1; j < Math.min(items.length, i + 5); j++) {
+          const lookNext = items[j];
+          if (lookNext && lookNext.created_at && itemTimeMs > 0) {
+            const tEnd = new Date(lookNext.created_at).getTime();
+            const dur = Math.round((tEnd - itemTimeMs) / 1000);
+            if (lookNext.type === 'USER_INPUT') {
+              const estDur = Math.max(1, Math.round((output || 100) / 120));
+              durationSec = dur >= 1 && dur <= estDur * 1.5 ? dur : estDur;
+              finishTime = new Date(itemTimeMs + durationSec * 1000).toISOString();
+            } else if (dur >= 0) {
+              durationSec = dur;
+              finishTime = lookNext.created_at;
+            }
+            break;
           }
         }
       }
@@ -564,40 +715,77 @@ function parseTranscriptFromDisk(logPath, stat) {
         totalPrompt: prompt,
         cacheHitRate: roundedHitRate,
         cacheGrade: classifyCacheHit(roundedHitRate, cache),
-        model: currentModel,
+        model: stepModelLabel,
+        ttftSec: stepTtftSec,
+        streamingSec: stepStreamingSec,
+        streamingTps: stepStreamingTps !== null ? formatTpsValue(stepStreamingTps) : null,
+        e2eTps: stepE2eTps !== null ? formatTpsValue(stepE2eTps) : null,
+        isMeasuredSpeed,
       });
     }
   }
 
-  // 汇总 TPS 与 TTFT 指标
-  let tps = 0;
-  let recentTps = 0;
-  let peakTps = 0;
-  if (tpsSamples.length > 0) {
-    let totTok = 0;
-    let totSec = 0;
-    for (const s of tpsSamples) {
-      totTok += s.outTok;
-      totSec += s.durSec;
-      if (s.stepTps > peakTps) peakTps = s.stepTps;
-    }
-    tps = totSec > 0 ? Math.round(totTok / totSec) : 0;
-    const recent = tpsSamples.slice(-10);
-    const rTok = recent.reduce((acc, s) => acc + s.outTok, 0);
-    const rSec = recent.reduce((acc, s) => acc + s.durSec, 0);
-    recentTps = rSec > 0 ? Math.round(rTok / rSec) : tps;
-  }
+  // 汇总 TPS 与 TTFT 指标：优先使用持续流式 SQLite 实测样本，无持续样本时回退短脉冲或日志时间戳估算
+  const speedSamples =
+    sustainedSpeedSamples.length > 0
+      ? sustainedSpeedSamples
+      : shortBurstSamples.length > 0
+        ? shortBurstSamples
+        : fallbackSpeedSamples;
+  const hasSqliteTelemetry =
+    sustainedSpeedSamples.length > 0 || shortBurstSamples.length > 0 || measuredTtftSamples.length > 0;
+  const speedSource = hasSqliteTelemetry ? 'sqlite' : (fallbackSpeedSamples.length > 0 ? 'estimated' : 'none');
 
+  let tps = 0;
+  let streamingTps = 0;
+  let recentTps = 0;
+  let medianTps = 0;
+  let e2eTps = 0;
+  let medianE2eTps = 0;
+  let sessionAvgTps = 0;
+  let peakTps = 0;
   let ttft = 0;
   let recentTtft = 0;
+  let medianTtft = 0;
   let userTtft = 0;
-  if (ttftSamples.length > 0) {
-    ttft = Math.round((ttftSamples.reduce((a, b) => a + b, 0) / ttftSamples.length) * 10) / 10;
-    const r = ttftSamples.slice(-10);
-    recentTtft = Math.round((r.reduce((a, b) => a + b, 0) / r.length) * 10) / 10;
+
+  if (speedSamples.length > 0) {
+    const lastSample = speedSamples[speedSamples.length - 1];
+    const recent5 = speedSamples.slice(-5);
+
+    tps = formatTpsValue(lastSample.streamingTps);
+    streamingTps = tps;
+    recentTps = formatTpsValue(computeMedian(recent5.map((s) => s.streamingTps)) ?? lastSample.streamingTps);
+    medianTps = recentTps;
+    e2eTps = formatTpsValue(lastSample.e2eTps ?? lastSample.streamingTps);
+    medianE2eTps = formatTpsValue(computeMedian(recent5.map((s) => s.e2eTps ?? s.streamingTps)) ?? e2eTps);
+
+    let totTok = 0;
+    let totSec = 0;
+    for (const s of speedSamples) {
+      totTok += s.outTok || 0;
+      totSec += s.streamingSec || s.durationSec || 0;
+      const val = formatTpsValue(s.streamingTps);
+      if (val > peakTps) peakTps = val;
+    }
+    sessionAvgTps = totSec > 0 ? formatTpsValue(totTok / totSec) : tps;
   }
-  if (userTtftSamples.length > 0) {
-    userTtft = Math.round((userTtftSamples.reduce((a, b) => a + b, 0) / userTtftSamples.length) * 10) / 10;
+
+  const validTtfts =
+    measuredTtftSamples.length > 0
+      ? measuredTtftSamples
+      : speedSamples.map((s) => s.ttftSec).filter((v) => v !== null && v >= 0);
+  if (validTtfts.length > 0) {
+    ttft = formatTtftValue(validTtfts[validTtfts.length - 1]);
+    const recentTtftMed = computeMedian(validTtfts.slice(-5));
+    recentTtft = formatTtftValue(recentTtftMed ?? validTtfts[validTtfts.length - 1]);
+    medianTtft = recentTtft;
+  }
+
+  if (measuredUserTtftSamples.length > 0) {
+    userTtft = formatTtftValue(measuredUserTtftSamples[measuredUserTtftSamples.length - 1]);
+  } else if (userTtftSamples.length > 0) {
+    userTtft = formatTtftValue(userTtftSamples[userTtftSamples.length - 1]);
   }
 
   const lifecycle = {
@@ -619,11 +807,14 @@ function parseTranscriptFromDisk(logPath, stat) {
 
   return {
     convId,
+    dbFallbackModel: genMetaInfo?.latestDisplayName || '',
     turns,
     steps,
     explicitModelSelected,
     parsedModel: currentModel,
     latestPlanner,
+    latestThinkingTokens,
+    latestResponseTokens,
     sessionCost: Math.round(sessionCost * 10000) / 10000,
     sessionInputTokens,
     sessionCacheTokens,
@@ -637,11 +828,18 @@ function parseTranscriptFromDisk(logPath, stat) {
     activeAgentChars,
     activeToolChars,
     tps,
+    streamingTps,
     recentTps,
+    medianTps,
+    e2eTps,
+    medianE2eTps,
+    sessionAvgTps,
     peakTps,
     ttft,
     recentTtft,
+    medianTtft,
     userTtft,
+    speedSource,
     recentHistory: plannerHistory.slice(-35),
     parentIndex,
     lifecycle,
@@ -652,7 +850,7 @@ function parseTranscriptFromDisk(logPath, stat) {
  * 基于缓存的静态解析结果与实时时钟（Date.now()）生成最终输出对象
  */
 function buildFinalStats(cached, logMtimeMs, maxWindowOverride = 0) {
-  const dbFallbackModel = readConversationDbModel(cached.convId)?.displayName || '';
+  const dbFallbackModel = cached.dbFallbackModel || readConversationDbModel(cached.convId)?.displayName || '';
   const detectedModel = cached.explicitModelSelected
     ? cached.parsedModel
     : dbFallbackModel || getDefaultCliModel();
@@ -686,11 +884,18 @@ function buildFinalStats(cached, logMtimeMs, maxWindowOverride = 0) {
       contextPercent: 0,
       tokPerSec: 0,
       tps: 0,
+      streamingTps: 0,
       recentTps: 0,
+      medianTps: 0,
+      e2eTps: 0,
+      medianE2eTps: 0,
+      sessionAvgTps: 0,
       peakTps: 0,
       ttft: 0,
       recentTtft: 0,
+      medianTtft: 0,
       userTtft: 0,
+      speedSource: 'none',
       estimatedCost: 0,
       compactions: { count: 0, totalReclaimedTokens: 0, reclaimedTokens: 0, lastCompaction: null },
       compaction: { count: 0, totalReclaimedTokens: 0, reclaimedTokens: 0, lastCompaction: null },
@@ -728,19 +933,24 @@ function buildFinalStats(cached, logMtimeMs, maxWindowOverride = 0) {
   const effectiveMaxWindow = maxWindowOverride > 0 ? maxWindowOverride : modelLimit;
   const contextPercent = effectiveMaxWindow > 0 ? (totalPrompt / effectiveMaxWindow) * 100 : 0;
 
-  // 最新单步思考与正文拆分
-  const lastThinkEst = estimateTokensFromText(lp.thinking || '');
-  const lastContentEst =
-    estimateTokensFromText(lp.content || '') +
-    estimateTokensFromText(lp.tool_calls ? JSON.stringify(lp.tool_calls) : '');
+  // 最新单步思考与正文拆分（优先复用 SQLite 服务端精确值）
   let latestThinking = 0;
   let latestResponse = output;
-  if (lastThinkEst + lastContentEst > 0 && output > 0) {
-    latestThinking = Math.min(output, Math.round((lastThinkEst / (lastThinkEst + lastContentEst)) * output));
-    latestResponse = output - latestThinking;
-  } else if (lastThinkEst > 0) {
-    latestThinking = Math.min(output, lastThinkEst);
-    latestResponse = Math.max(0, output - latestThinking);
+  if (cached.latestThinkingTokens !== null && cached.latestResponseTokens !== null) {
+    latestThinking = cached.latestThinkingTokens;
+    latestResponse = cached.latestResponseTokens;
+  } else {
+    const lastThinkEst = estimateTokensFromText(lp.thinking || '');
+    const lastContentEst =
+      estimateTokensFromText(lp.content || '') +
+      estimateTokensFromText(lp.tool_calls ? JSON.stringify(lp.tool_calls) : '');
+    if (lastThinkEst + lastContentEst > 0 && output > 0) {
+      latestThinking = Math.min(output, Math.round((lastThinkEst / (lastThinkEst + lastContentEst)) * output));
+      latestResponse = output - latestThinking;
+    } else if (lastThinkEst > 0) {
+      latestThinking = Math.min(output, lastThinkEst);
+      latestResponse = Math.max(0, output - latestThinking);
+    }
   }
 
   // 动态分类占比拆解
@@ -852,11 +1062,18 @@ function buildFinalStats(cached, logMtimeMs, maxWindowOverride = 0) {
     contextPercent: Math.round(contextPercent * 10) / 10,
     tokPerSec,
     tps: cached.tps,
+    streamingTps: cached.streamingTps,
     recentTps: cached.recentTps,
+    medianTps: cached.medianTps,
+    e2eTps: cached.e2eTps,
+    medianE2eTps: cached.medianE2eTps,
+    sessionAvgTps: cached.sessionAvgTps,
     peakTps: cached.peakTps,
     ttft: cached.ttft,
     recentTtft: cached.recentTtft,
+    medianTtft: cached.medianTtft,
     userTtft: cached.userTtft,
+    speedSource: cached.speedSource,
     estimatedCost: cached.sessionCost,
     compactions: compactionInfo,
     compaction: compactionInfo,
@@ -869,9 +1086,9 @@ function buildFinalStats(cached, logMtimeMs, maxWindowOverride = 0) {
 }
 
 /**
- * 解析指定 transcript.jsonl（默认命中 mtime+size 缓存，force=true 时强制重读磁盘）
+ * 解析指定 transcript.jsonl（默认命中 transcript mtime+size 与 DB WAL 组合缓存，force=true 时强制重读磁盘）
  */
-export function parseTranscript(logPath, { maxWindowOverride = 0, force = false } = {}) {
+export function parseTranscript(logPath, { maxWindowOverride = 0, force = false, conversationsDir = '' } = {}) {
   if (!fs.existsSync(logPath)) return null;
 
   let stat;
@@ -881,13 +1098,22 @@ export function parseTranscript(logPath, { maxWindowOverride = 0, force = false 
     return null;
   }
 
+  const convId = path.basename(path.dirname(path.dirname(path.dirname(logPath))));
+  const effectiveConvDir = resolveConversationsDirForLog(logPath, conversationsDir);
+  const dbSig = getConversationDbSignature(convId, effectiveConvDir);
+
   const cachedEntry = !force ? transcriptCache.get(logPath) : null;
-  if (cachedEntry && cachedEntry.mtimeMs === stat.mtimeMs && cachedEntry.size === stat.size) {
+  if (
+    cachedEntry &&
+    cachedEntry.mtimeMs === stat.mtimeMs &&
+    cachedEntry.size === stat.size &&
+    cachedEntry.dbSig === dbSig
+  ) {
     return buildFinalStats(cachedEntry.data, stat.mtimeMs, maxWindowOverride);
   }
 
   try {
-    const parsed = parseTranscriptFromDisk(logPath, stat);
+    const parsed = parseTranscriptFromDisk(logPath, stat, effectiveConvDir);
     if (transcriptCache.size >= MAX_CACHE_ENTRIES) {
       const oldestKey = transcriptCache.keys().next().value;
       transcriptCache.delete(oldestKey);
@@ -895,6 +1121,7 @@ export function parseTranscript(logPath, { maxWindowOverride = 0, force = false 
     transcriptCache.set(logPath, {
       mtimeMs: stat.mtimeMs,
       size: stat.size,
+      dbSig,
       data: parsed,
     });
     return buildFinalStats(parsed, stat.mtimeMs, maxWindowOverride);

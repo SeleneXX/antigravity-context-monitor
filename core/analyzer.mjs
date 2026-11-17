@@ -1,9 +1,16 @@
 import fs from 'fs';
 import path from 'path';
 import { BRAIN_DIR, DEFAULT_MAX_WINDOW } from './constants.mjs';
-import { clearModelCache, classifyCacheHit } from './models.mjs';
+import { clearModelCache, classifyCacheHit, computeMedian } from './models.mjs';
 import { parseTranscript, clearTranscriptCache } from './transcript.mjs';
 import { getSubagentsForConversation, readSwarmContext, clearSubagentCache } from './subagents.mjs';
+import {
+  getGlobalLedger,
+  saveLedgerSettings,
+  getLedgerSettings,
+  computeRoiSummary,
+  clearLedgerMemoryCache,
+} from './ledger.mjs';
 
 let cachedConvs = null;
 let lastConvsFetchTime = 0;
@@ -40,7 +47,10 @@ export function clearAllCaches() {
   clearModelCache();
   clearTranscriptCache();
   clearSubagentCache();
+  clearLedgerMemoryCache();
 }
+
+export { getGlobalLedger, saveLedgerSettings, getLedgerSettings, computeRoiSummary };
 
 /**
  * 列出所有顶层主会话（排除子代理目录），按最后活跃时间降序排列
@@ -155,6 +165,7 @@ export function getSessionSnapshot({
         combinedContextPercent: 0,
         combinedTokPerSec: 0,
         combinedTps: 0,
+        combinedE2eTps: 0,
         combinedTtft: 0,
         combinedCompactions: 0,
         combinedReclaimedTokens: 0,
@@ -180,10 +191,12 @@ export function getSessionSnapshot({
   let combinedCompactions = stats.compactions?.count || 0;
   let combinedReclaimedTokens = stats.compactions?.totalReclaimedTokens || 0;
 
-  let speedSum = stats.tps || stats.tokPerSec || 0;
-  let speedCount = speedSum > 0 ? 1 : 0;
-  let ttftSum = stats.ttft || 0;
-  let ttftCount = ttftSum > 0 ? 1 : 0;
+  const streamTpsSamples = [];
+  const e2eTpsSamples = [];
+  const ttftSamples = [];
+  if ((stats.tps || stats.tokPerSec || 0) > 0) streamTpsSamples.push(stats.tps || stats.tokPerSec);
+  if ((stats.e2eTps || 0) > 0) e2eTpsSamples.push(stats.e2eTps);
+  if ((stats.ttft || 0) > 0) ttftSamples.push(stats.ttft);
 
   for (const sa of subagents) {
     combinedTotalPrompt += sa.totalPromptTokens || 0;
@@ -198,14 +211,9 @@ export function getSessionSnapshot({
     combinedReclaimedTokens += sa.compactions?.totalReclaimedTokens || 0;
 
     const sTps = sa.tps || sa.tokPerSec || 0;
-    if (sTps > 0) {
-      speedSum += sTps;
-      speedCount++;
-    }
-    if (sa.ttft > 0) {
-      ttftSum += sa.ttft;
-      ttftCount++;
-    }
+    if (sTps > 0) streamTpsSamples.push(sTps);
+    if ((sa.e2eTps || 0) > 0) e2eTpsSamples.push(sa.e2eTps);
+    if ((sa.ttft || 0) > 0) ttftSamples.push(sa.ttft);
   }
 
   const combinedAllPrompt = combinedInputTotal + combinedCacheTotal;
@@ -215,8 +223,15 @@ export function getSessionSnapshot({
       : stats.cacheHitRate;
   const combinedContextPercent =
     activeMaxWindow > 0 ? Math.round((combinedTotalPrompt / activeMaxWindow) * 1000) / 10 : 0;
-  const combinedTps = speedCount > 0 ? Math.round(speedSum / speedCount) : stats.tps || stats.tokPerSec || 0;
-  const combinedTtft = ttftCount > 0 ? Math.round((ttftSum / ttftCount) * 10) / 10 : stats.ttft || 0;
+  const medStream = computeMedian(streamTpsSamples);
+  const medE2e = computeMedian(e2eTpsSamples);
+  const medTtft = computeMedian(ttftSamples);
+  const combinedTps = medStream !== null ? Math.round(medStream) : stats.tps || stats.tokPerSec || 0;
+  const combinedE2eTps = medE2e !== null ? Math.round(medE2e) : stats.e2eTps || combinedTps;
+  const combinedTtft =
+    medTtft !== null
+      ? (medTtft < 10 ? Number(medTtft.toFixed(2)) : Number(medTtft.toFixed(1)))
+      : stats.ttft || 0;
 
   const allAgentsSummary = {
     totalAgents: 1 + subagents.length,
@@ -233,6 +248,7 @@ export function getSessionSnapshot({
     combinedContextPercent,
     combinedTokPerSec: combinedTps,
     combinedTps,
+    combinedE2eTps,
     combinedTtft,
     combinedCompactions,
     combinedReclaimedTokens,

@@ -110,6 +110,31 @@ function setNoCacheHeaders(res, contentType) {
   }
 }
 
+function readJsonBody(req, maxBytes = 16 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        reject(new Error('Request body too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      try {
+        const text = Buffer.concat(chunks).toString('utf8').trim();
+        resolve(text ? JSON.parse(text) : {});
+      } catch {
+        reject(new Error('Invalid JSON payload'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
 const server = http.createServer(async (req, res) => {
   const reqUrl = new URL(req.url || '/', `http://${req.headers.host || '127.0.0.1'}`);
   const pathname = reqUrl.pathname;
@@ -146,6 +171,27 @@ const server = http.createServer(async (req, res) => {
       setNoCacheHeaders(res, 'application/json; charset=utf-8');
       res.writeHead(200);
       res.end(JSON.stringify(api.getConversations({ force })));
+      return;
+    }
+
+    if (pathname === '/api/ledger') {
+      const force = reqUrl.searchParams.get('force') === '1';
+      const api = await getCoreApi(false);
+      const ledger = await api.getGlobalLedger({ force });
+      setNoCacheHeaders(res, 'application/json; charset=utf-8');
+      res.writeHead(200);
+      res.end(JSON.stringify(ledger));
+      return;
+    }
+
+    if (pathname === '/api/ledger/settings' && req.method === 'POST') {
+      const body = await readJsonBody(req, 16 * 1024);
+      const api = await getCoreApi(false);
+      const settings = api.saveLedgerSettings(body || {});
+      const ledger = await api.getGlobalLedger({ force: false });
+      setNoCacheHeaders(res, 'application/json; charset=utf-8');
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, settings, ledger }));
       return;
     }
 

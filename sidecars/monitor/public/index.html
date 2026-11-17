@@ -19,6 +19,15 @@
     </div>
     <div class="controls-area">
       <span id="refreshToast" class="refresh-toast">✓ 已刷新</span>
+      <button id="openLedgerBtn" class="ledger-trigger-btn" title="打开个人中心：全局历史 Token 账本、52 周热力图、模型测速与费用回本">
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+          <rect x="1" y="1" width="5" height="5" rx="1.2" fill="#34d399" opacity="0.45"/>
+          <rect x="8" y="1" width="5" height="5" rx="1.2" fill="#34d399"/>
+          <rect x="1" y="8" width="5" height="5" rx="1.2" fill="#10b981" opacity="0.75"/>
+          <rect x="8" y="8" width="5" height="5" rx="1.2" fill="#a7f3d0"/>
+        </svg>
+        <span>个人账本</span>
+      </button>
       <button id="refreshBtn" title="清空缓存并强制刷新前后端状态（按住 Shift 点击可整页重载）">
         <span class="spin-icon">↻</span>
       </button>
@@ -127,15 +136,15 @@
           <div class="value" id="cardTotalTok">0</div>
           <div id="cardSessionThinkBreakdown" class="stat-sub">🧠 思考: 0 · 💬 正文: 0</div>
         </div>
-        <div class="stat-tile">
-          <div class="label">TPS (生成速率)</div>
+        <div class="stat-tile" id="tileTps">
+          <div class="label">TPS (当前流式速率)</div>
           <div class="value" id="cardTps" style="color:var(--accent-purple)">0 tok/s</div>
-          <div id="cardTpsSub" class="stat-sub">近期: 0 tok/s · 峰值: 0 tok/s</div>
+          <div id="cardTpsSub" class="stat-sub">近5步中位: -- · 端到端: --</div>
         </div>
-        <div class="stat-tile">
+        <div class="stat-tile" id="tileTtft">
           <div class="label">TTFT (首字响应延迟)</div>
           <div class="value" id="cardTtft" style="color:var(--accent-blue)">--</div>
-          <div id="cardTtftSub" class="stat-sub">近期: -- · 用户响应: --</div>
+          <div id="cardTtftSub" class="stat-sub">近5步中位: -- · 用户响应: --</div>
         </div>
       </div>
 
@@ -150,15 +159,15 @@
           <div class="value" id="cardAllTotalTok">0</div>
           <div id="cardAllOutputBreakdown" class="stat-sub">🧠 思考: 0 · 💬 正文: 0</div>
         </div>
-        <div class="stat-tile">
-          <div class="label">综合 TPS (吞吐速率)</div>
+        <div class="stat-tile" id="tileAllTps">
+          <div class="label">集群流式 TPS (中位)</div>
           <div class="value" id="cardAllTps" style="color:var(--accent-purple)">0 tok/s</div>
-          <div id="cardAllTpsSub" class="stat-sub">主 Agent + Subagents 协同速率</div>
+          <div id="cardAllTpsSub" class="stat-sub">端到端: -- · 主 + 0 个 Subagents</div>
         </div>
-        <div class="stat-tile">
-          <div class="label">综合平均 TTFT</div>
+        <div class="stat-tile" id="tileAllTtft">
+          <div class="label">集群真实 TTFT (中位)</div>
           <div class="value" id="cardAllTtft" style="color:var(--accent-blue)">--</div>
-          <div id="cardAllTtftSub" class="stat-sub">集群多 Agent 平均首 Token 响应延迟</div>
+          <div id="cardAllTtftSub" class="stat-sub">多 Agent 首 Token 响应延迟中位数</div>
         </div>
       </div>
     </div>
@@ -264,6 +273,228 @@
   <div class="footer">
     Antigravity Context Monitor · 实时每 1.5 秒同步 · 支持文件热重载
   </div>
+
+  <!-- 个人中心：全局历史 Token 账本 Popup -->
+  <div id="ledgerModalOverlay" class="ledger-modal-overlay" aria-hidden="true">
+    <div class="ledger-modal" role="dialog" aria-modal="true" aria-labelledby="ledgerModalTitle">
+      <!-- 弹窗 Sticky 顶栏 -->
+      <div class="ledger-modal-header">
+        <div class="ledger-header-left">
+          <div class="ledger-title-row">
+            <span class="ledger-title-icon">📊</span>
+            <h3 id="ledgerModalTitle">个人账本中心</h3>
+          </div>
+          <div id="ledgerScanMeta" class="ledger-scan-meta">正在扫描本地桌面端与 CLI 会话...</div>
+        </div>
+        <div class="ledger-header-right">
+          <div class="ledger-seg-group" id="ledgerSourceGroup" title="筛选数据来源">
+            <button type="button" class="ledger-seg-btn active" data-source="all">全部</button>
+            <button type="button" class="ledger-seg-btn" data-source="desktop">桌面端</button>
+            <button type="button" class="ledger-seg-btn" data-source="cli">CLI</button>
+          </div>
+          <button type="button" id="ledgerRefreshBtn" class="ledger-icon-btn" title="强制重扫全部本地桌面与 CLI 历史会话">
+            <span class="spin-icon">↻</span>
+          </button>
+          <button type="button" id="closeLedgerBtn" class="ledger-icon-btn" title="关闭 (Esc)">✕</button>
+        </div>
+      </div>
+
+      <!-- 主功能页签 -->
+      <div class="ledger-nav-tabs" id="ledgerNavTabs">
+        <button type="button" class="ledger-nav-tab active" data-tab="activity">🔥 活跃与统计</button>
+        <button type="button" class="ledger-nav-tab" data-tab="speed">⚡ 模型测速榜</button>
+        <button type="button" class="ledger-nav-tab" data-tab="billing">💰 账单与回本</button>
+      </div>
+
+      <!-- 弹窗滚动主体 -->
+      <div class="ledger-modal-body" id="ledgerModalBody">
+        <div id="ledgerLoadingState" class="ledger-loading">
+          <div class="ledger-spinner"></div>
+          <div>正在聚合本地历史 Token 账本与模型测速样本...</div>
+        </div>
+
+        <!-- 页签 1: 活跃热力图与多维统计 -->
+        <div id="ledgerTabActivity" class="ledger-tab-pane">
+          <div class="ledger-kpi-grid">
+            <div class="ledger-kpi-card">
+              <div class="kpi-label">累计总 Token</div>
+              <div class="kpi-value" id="kpiGrandTotal">0</div>
+              <div class="kpi-sub" id="kpiGrandSub">输入 0 · 缓存 0 · 输出 0</div>
+            </div>
+            <div class="ledger-kpi-card">
+              <div class="kpi-label">今日 / 本月用量</div>
+              <div class="kpi-value" id="kpiTodayVal" style="color:var(--accent-blue)">0</div>
+              <div class="kpi-sub" id="kpiMonthWeekSub">本月 0 · 本周 0</div>
+            </div>
+            <div class="ledger-kpi-card">
+              <div class="kpi-label">活跃 / 陪伴天数</div>
+              <div class="kpi-value" id="kpiActiveDays" style="color:var(--accent-green)">0 天</div>
+              <div class="kpi-sub" id="kpiFirstUseSub">始于 -- · 共 0 会话</div>
+            </div>
+            <div class="ledger-kpi-card">
+              <div class="kpi-label">本月等效 API 价值</div>
+              <div class="kpi-value" id="kpiMonthCost" style="color:#fbbf24">$0.00</div>
+              <div class="kpi-sub" id="kpiCostSub">≈ ¥0.00 · 累计 $0.00</div>
+            </div>
+          </div>
+
+          <!-- 52 周活跃热力图 -->
+          <div class="ledger-section-card">
+            <div class="ledger-section-head">
+              <div class="ledger-section-title-wrap">
+                <span class="ledger-section-title">52 周活跃热力图</span>
+                <span id="heatmapSummaryText" class="ledger-section-sub">共 0 Tokens · 0 个活跃日</span>
+              </div>
+              <div class="ledger-heatmap-tools">
+                <select id="ledgerYearSelect" class="ledger-select-sm" title="切换热力图时间范围">
+                  <option value="rolling">最近 52 周</option>
+                </select>
+                <div class="heatmap-theme-dots" id="heatmapThemeDots" title="切换热力图配色主题">
+                  <button type="button" class="theme-dot active" data-theme="emerald" style="background:#26a641" title="翠绿"></button>
+                  <button type="button" class="theme-dot" data-theme="amethyst" style="background:#8b5cf6" title="紫晶"></button>
+                  <button type="button" class="theme-dot" data-theme="ocean" style="background:#0284c7" title="冰蓝"></button>
+                  <button type="button" class="theme-dot" data-theme="amber" style="background:#d97706" title="琥珀"></button>
+                </div>
+              </div>
+            </div>
+
+            <div class="heatmap-outer">
+              <div class="heatmap-weekdays">
+                <span class="hm-wk-spacer"></span>
+                <span></span>
+                <span>一</span>
+                <span></span>
+                <span>三</span>
+                <span></span>
+                <span>五</span>
+                <span></span>
+              </div>
+              <div class="heatmap-scroll-wrap" id="heatmapScrollWrap">
+                <div class="heatmap-months" id="heatmapMonths"></div>
+                <div class="heatmap-cols" id="heatmapCols"></div>
+              </div>
+            </div>
+
+            <div class="heatmap-footer">
+              <span class="heatmap-hint">悬停或点击方格查看当日用量与金额</span>
+              <div class="heatmap-legend" id="heatmapLegend">
+                <span>Less</span>
+                <span class="hm-legend-cell" data-lvl="0"></span>
+                <span class="hm-legend-cell" data-lvl="1"></span>
+                <span class="hm-legend-cell" data-lvl="2"></span>
+                <span class="hm-legend-cell" data-lvl="3"></span>
+                <span class="hm-legend-cell" data-lvl="4"></span>
+                <span>More</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 多维统计子视图 -->
+          <div class="ledger-section-card">
+            <div class="ledger-section-head">
+              <span class="ledger-section-title">多维趋势与周期明细</span>
+              <div class="ledger-seg-group" id="chartModeGroup">
+                <button type="button" class="ledger-seg-btn active" data-mode="weekly">周柱状图</button>
+                <button type="button" class="ledger-seg-btn" data-mode="monthly">月度明细</button>
+                <button type="button" class="ledger-seg-btn" data-mode="yearly">年度气泡</button>
+                <button type="button" class="ledger-seg-btn" data-mode="cumulative">累计曲线</button>
+              </div>
+            </div>
+            <div id="ledgerChartBody" class="ledger-chart-body"></div>
+          </div>
+        </div>
+
+        <!-- 页签 2: 模型测速榜 -->
+        <div id="ledgerTabSpeed" class="ledger-tab-pane" style="display:none">
+          <div class="ledger-section-card">
+            <div class="ledger-section-head">
+              <div class="ledger-section-title-wrap">
+                <span class="ledger-section-title">各模型实测速度对比 (中位数)</span>
+                <span class="ledger-section-sub">基于 SQLite 原生计时，每模型取最近最多 200 次有效生成</span>
+              </div>
+              <div class="ledger-seg-group" id="speedMetricGroup">
+                <button type="button" class="ledger-seg-btn active" data-metric="streamingTps">纯流式 TPS</button>
+                <button type="button" class="ledger-seg-btn" data-metric="e2eTps">端到端 TPS</button>
+                <button type="button" class="ledger-seg-btn" data-metric="ttftSec">首字延迟 TTFT</button>
+                <button type="button" class="ledger-seg-btn" data-metric="durationSec">单次耗时</button>
+              </div>
+            </div>
+            <div id="speedRankList" class="speed-rank-list"></div>
+          </div>
+
+          <div class="ledger-section-card" id="speedTrendCard">
+            <div class="ledger-section-head">
+              <div class="ledger-section-title-wrap">
+                <span class="ledger-section-title" id="speedTrendTitle">历史速度趋势折线</span>
+                <span class="ledger-section-sub" id="speedTrendSub">点击上方任意模型可切换查看近期波动轨迹</span>
+              </div>
+            </div>
+            <div class="speed-canvas-wrap">
+              <canvas id="speedTrendCanvas"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <!-- 页签 3: API 费用账单与订阅回本 -->
+        <div id="ledgerTabBilling" class="ledger-tab-pane" style="display:none">
+          <div class="ledger-section-card">
+            <div class="ledger-section-head">
+              <div class="ledger-section-title-wrap">
+                <span class="ledger-section-title">订阅月费与回本核算</span>
+                <span class="ledger-section-sub">支持按实际支付方案、币种与自定义汇率计算本月回本倍率</span>
+              </div>
+              <span id="cfgSaveToast" class="cfg-save-toast">✓ 已保存</span>
+            </div>
+
+            <div class="roi-form-grid">
+              <label class="roi-field">
+                <span>订阅方案</span>
+                <select id="cfgPreset"></select>
+              </label>
+              <label class="roi-field">
+                <span>月付实付</span>
+                <input type="number" id="cfgMonthlyPrice" step="0.01" min="0" />
+              </label>
+              <label class="roi-field">
+                <span>支付币种</span>
+                <select id="cfgCurrency"></select>
+              </label>
+              <label class="roi-field">
+                <span>1 USD ≈ CNY</span>
+                <input type="number" id="cfgUsdToCny" step="0.01" min="0.1" />
+              </label>
+              <div class="roi-field roi-field-btn">
+                <span>&nbsp;</span>
+                <button type="button" id="saveLedgerCfgBtn" class="roi-save-btn">保存并重算</button>
+              </div>
+            </div>
+
+            <div id="roiSummaryBox" class="roi-summary-box"></div>
+          </div>
+
+          <div class="ledger-section-card">
+            <div class="ledger-section-head">
+              <div class="ledger-section-title-wrap">
+                <span class="ledger-section-title">分模型 API 等值明细</span>
+                <span class="ledger-section-sub" id="billingScopeNote">缓存读取按官方 5%~10% 优惠计，Orchestrator 按 Carbon/Argon 与 Hydrogen 逐跳分别计价</span>
+              </div>
+              <div class="ledger-seg-group" id="billingPeriodGroup">
+                <button type="button" class="ledger-seg-btn active" data-period="month">本月账单</button>
+                <button type="button" class="ledger-seg-btn" data-period="all">历史累计</button>
+              </div>
+            </div>
+            <div id="billingModelTableWrap" class="billing-table-wrap"></div>
+            <div class="billing-footnote">
+              注：API 等值金额基于公开标准单价估算，仅供了解 Token 消费规模与订阅回本对比，实际账单以服务商结算为准。
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 悬浮/点击共用气泡 (防越界定位) -->
+  <div id="ledgerPopover" class="ledger-popover" role="status" aria-hidden="true"></div>
 
   <!-- INLINE_SCRIPT -->
 </body>

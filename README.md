@@ -11,7 +11,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Antigravity-Plugin-6366f1?style=flat-square&logo=google" alt="Antigravity Plugin">
-  <img src="https://img.shields.io/badge/Version-1.1.0-emerald?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/Version-1.2.0-emerald?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/Node.js-%3E%3D18-blue?style=flat-square&logo=node.js" alt="Node.js">
   <img src="https://img.shields.io/badge/License-MIT-amber?style=flat-square" alt="License">
 </p>
@@ -38,21 +38,16 @@
   - **环形水位表盘 (Donut Gauge)**：直观展示已用 Token / 安全压缩容量，自动识别当前模型并匹配平台压缩阈值（Gemini 4 Carbon / Argon / Hydrogen 512K、Gemini 3.8 Flash 256K、Claude Opus / Sonnet 512K，灰度突破时自动阶梯扩容）。
   - **200 格点阵图 (Context Usage Matrix Map)**：精细化映射上下文构成，哪些是工具输出、哪些是历史对话、哪些是系统提示词一目了然。
   - **Token 分类深度剖析**：精确区分 `User messages`、`Agent responses`、`Tool calls & outputs`、`System prompt`、`System tools`、`Skills`、`Subagents 声明` 与 `Free space`。
-  - **性能实时指标**：实时计算推理 TPS (tok/s)、首字响应延迟 (TTFT)、Prompt Cache 累计与最新单步命中率。
+  - **性能实时指标（SQLite 原生遥测）**：优先直读会话库纳秒级实测计时，精准区分最新单步「纯流式 TPS」、近 5 步中位数、端到端 TPS、真实首字响应延迟 (TTFT) 以及 Prompt Cache 累计与最新单步命中率。
+  - **📊 个人账本中心 (Popup)**：点击顶栏右侧「个人账本」按钮即可展开独立弹窗，聚合桌面端与 `agy` CLI 双源增量历史账本，提供 **GitHub 风格 52 周活跃热力图**、周/月/年与累计曲线趋势、**各模型实测速度中位数对比榜**，以及支持自定义订阅方案与汇率的 **API 等值费用与回本核算**。
   - **Subagents 隔离与生命周期追踪**：独立展示每个 Subagent 的沙盒上下文与模型层级，基于时序状态机精准识别 `等待后台任务`（如编译/测试）、`上下文压缩中`、`模型推理中` 等细分运行态。
   - **Step 消耗时序日志**：清晰追溯过去每一步的 Prompt 增量与 Cache Hit 状态。
 
 - 🔄 **全链路免重启热重载 (Live Hot-Reload)**:
   - 修改 `core/*` 逻辑、`public/*` 前端界面或点击面板右上角 `↻` 按钮均可实时热更新生效，开发调试无需反复重启 Antigravity。
 
-- ⚡ **即时技能查询 (`/context`)**:
-  - 在对话中直接输入 `/context` 或询问“用了多少上下文”，智能 Agent 即可调取脚本输出即时状态摘要并提供侧边栏直达链接。
-
-- 🛡️ **智能上下文健康守卫 (`rules/AGENTS.md`)**:
-  - 持续关注长对话的上下文健康度。当接近警戒水位或步骤过多时，适时提示用户使用 `/compact` 压缩整理，保障推理响应速度与回答质量。
-
 - 🪶 **轻量零依赖、开箱即用**:
-  - 采用纯原生 Node.js 构建，无需任何第三方 npm 依赖包，启动迅速、安全轻便。
+  - 采用纯原生 Node.js 构建，无需任何第三方 npm 依赖包，启动迅速、安全轻便，不向模型注入额外提示词或斜杠指令。
 
 ---
 
@@ -100,21 +95,8 @@
 
 ## 💡 使用方法
 
-### 1. 聊天指令
-在 Antigravity 聊天窗口中输入 `/context`，或直接向 Agent 提问：
-- *"当前会话消耗了多少上下文？"*
-- *"查看当前的 Cache 命中率和 Token 使用量"*
-
-Agent 会即时返回如下格式的统计卡片：
-```markdown
-⏱️ 35 turns · 1527 steps | 💾 205.7K tok · Cache hit 93.8% | 🟢 80.3% (205,670 / 256k)
-⚡ 当前模型: Gemini 3.8 Flash (High) | ⚡ TPS: 69 tok/s · TTFT: 4.2s | 🧠 思考: 151.6K · 💬 正文: 325.7K
-
-[📊 打开侧边栏实时监控面板](sidecar://context-monitor/monitor/)
-```
-
-### 2. 侧边栏监控面板
-点击聊天中的 `[Context Monitor](sidecar://context-monitor/monitor/)` 链接，即可在右侧 **Auxiliary Pane (辅助面板)** 打开常驻的实时仪表盘，数据每 1.5 秒自动同步。
+### 侧边栏监控面板
+在 Antigravity 右侧 **Auxiliary Pane (辅助面板)** 打开 **Context Monitor**，即可常驻查看实时仪表盘，数据每 1.5 秒自动同步。
 
 ---
 
@@ -128,19 +110,13 @@ context-monitor/
 │   ├── logo.svg                # 插件矢量图标
 │   ├── preview-overview.jpg    # 仪表盘总览截图
 │   └── preview-breakdown.jpg   # 上下文细分截图
-├── core/                       # 统一共享解析引擎（Sidecar 与 CLI 共用）
+├── core/                       # 统一共享解析引擎
 │   ├── constants.mjs           # 模型压缩阈值、价格表与系统开销常量
 │   ├── models.mjs              # 会话模型探测与子智能体层级映射
 │   ├── transcript.mjs          # 单遍高性能日志解析与 mtime 内存缓存
-│   ├── subagents.mjs           # 子智能体发现与时序状态机（含后台任务等待追踪）
+│   ├── subagents.mjs           # 子智能体与 Swarm 发现与时序状态机
+│   ├── ledger.mjs              # 桌面端与 CLI 全局增量历史账本、热力图与测速聚合
 │   └── analyzer.mjs            # 会话监控快照统一聚合出口
-├── rules/
-│   └── AGENTS.md               # 上下文健康感知与智能提示规则
-├── skills/
-│   └── context/
-│       ├── SKILL.md            # /context 技能定义
-│       └── scripts/
-│           └── get_context.mjs # 实时统计提取脚本 (Node.js ESM)
 └── sidecars/
     └── monitor/
         ├── sidecar.json        # 侧边栏扩展配置定义
