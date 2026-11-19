@@ -38,7 +38,7 @@
   - **环形水位表盘 (Donut Gauge)**：直观展示已用 Token / 安全压缩容量，自动识别当前模型并匹配平台压缩阈值（Gemini 4 Carbon / Argon / Hydrogen 512K、Gemini 3.8 Flash 256K、Claude Opus / Sonnet 512K，灰度突破时自动阶梯扩容）。
   - **200 格点阵图 (Context Usage Matrix Map)**：精细化映射上下文构成，哪些是工具输出、哪些是历史对话、哪些是系统提示词一目了然。
   - **Token 分类深度剖析**：精确区分 `User messages`、`Agent responses`、`Tool calls & outputs`、`System prompt`、`System tools`、`Skills`、`Subagents 声明` 与 `Free space`。
-  - **性能实时指标（SQLite 原生遥测）**：优先直读会话库纳秒级实测计时，精准区分最新单步「纯流式 TPS」、近 5 步中位数、端到端 TPS、真实首字响应延迟 (TTFT) 以及 Prompt Cache 累计与最新单步命中率。
+  - **性能实时指标（SQLite 原生遥测）**：优先直读会话库纳秒级实测计时，将生成速度与首字等待彻底解耦——精准展示最新单步「纯流式 TPS」、近 5 步中位数、历史峰值 TPS，以及真实首字响应延迟 (TTFT) 与 Prompt Cache 累计/单步命中率。
   - **📊 个人账本中心 (Popup)**：点击顶栏右侧「个人账本」按钮即可展开独立弹窗，聚合桌面端与 `agy` CLI 双源增量历史账本，提供 **GitHub 风格 52 周活跃热力图**、周/月/年与累计曲线趋势、**各模型实测速度中位数对比榜**，以及支持自定义订阅方案与汇率的 **API 等值费用与回本核算**。
   - **Subagents 隔离与生命周期追踪**：独立展示每个 Subagent 的沙盒上下文与模型层级，基于时序状态机精准识别 `等待后台任务`（如编译/测试）、`上下文压缩中`、`模型推理中` 等细分运行态。
   - **Step 消耗时序日志**：清晰追溯过去每一步的 Prompt 增量与 Cache Hit 状态。

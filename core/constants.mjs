@@ -19,6 +19,11 @@ export const MONITOR_DATA_DIR = path.join(SCRATCH_DIR, 'context-monitor-data');
 
 // Swarm / 内部模型 ID 到展示名的兜底映射（当 conversations/*.db 不可读时使用）
 export const SWARM_MODEL_DISPLAY_NAMES = {
+  'gemini-4-neon': 'Gemini 4 Neon',
+  'gemini-4-neon-low': 'Gemini 4 Neon (Low)',
+  'gemini-4-neon-medium': 'Gemini 4 Neon (Medium)',
+  'gemini-4-neon-high': 'Gemini 4 Neon (High)',
+  'gemini-4-neon-xhigh': 'Gemini 4 Neon (XHigh)',
   'gemini-4-carbon-low': 'Gemini 4 Carbon (Low)',
   'gemini-4-carbon-medium': 'Gemini 4 Carbon (Medium)',
   'gemini-4-carbon-high': 'Gemini 4 Carbon (High)',
@@ -29,6 +34,10 @@ export const SWARM_MODEL_DISPLAY_NAMES = {
   'gemini-4-hydrogen-medium': 'Gemini 4 Hydrogen (Medium)',
   'gemini-4-hydrogen-high': 'Gemini 4 Hydrogen (High)',
   'gemini-4-hydrogen-xhigh': 'Gemini 4 Hydrogen (XHigh)',
+  'gemini-4-hydrogen-tiered-low': 'Gemini 4 Hydrogen (Low)',
+  'gemini-4-hydrogen-tiered-medium': 'Gemini 4 Hydrogen (Medium)',
+  'gemini-4-hydrogen-tiered-high': 'Gemini 4 Hydrogen (High)',
+  'gemini-4-hydrogen-tiered-xhigh': 'Gemini 4 Hydrogen (XHigh)',
   'gemini-3.8-flash-low': 'Gemini 3.8 Flash (Low)',
   'gemini-3.8-flash-medium': 'Gemini 3.8 Flash (Medium)',
   'gemini-3.8-flash-high': 'Gemini 3.8 Flash (High)',

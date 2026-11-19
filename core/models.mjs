@@ -52,6 +52,7 @@ export function getModelMaxWindow(modelName, promptTokens = 0) {
     } else if (m.includes('oss') || m.includes('gpt')) {
       limit = COMPACTION_THRESHOLDS.GPT_OSS;
     } else if (
+      m.includes('neon') ||
       m.includes('carbon') ||
       m.includes('argon') ||
       m.includes('hydrogen') ||
@@ -78,7 +79,7 @@ export function getModelPricingTier(modelName) {
   const m = String(modelName).toLowerCase();
   // 先判定 Hydrogen / 调度执行 worker，防止名称中的 flash 或 orchestrator 被误归到 3.8 Flash 或 Carbon
   if (m.includes('hydrogen') || m.includes('gemini-flash-worker-agy')) return 'gemini-4-hydrogen';
-  if (m.includes('carbon') || m.includes('argon') || m.includes('orchestrator') || m.includes('gemini 4') || m.includes('gemini-4')) {
+  if (m.includes('neon') || m.includes('carbon') || m.includes('argon') || m.includes('orchestrator') || m.includes('gemini 4') || m.includes('gemini-4')) {
     return 'gemini-4-carbon';
   }
   if (m.includes('flash-lite') || m.includes('flash_lite') || m.includes('flash lite')) return 'gemini-flash-lite';
@@ -204,12 +205,18 @@ export function normalizeCanonicalModel(rawModelId = '', rawDisplayName = '') {
 let cachedCliModel = null;
 let cachedCliModelTime = 0;
 const genMetaCache = new Map(); // `${dir}|${convId}` -> { sig, info }
+const parentMetaCache = new Map(); // `${dir}|${convId}` -> { sig, info }
+const workflowStepsCache = new Map(); // `${dir}|${convId}` -> { sig, agents }
 const MAX_GEN_META_CACHE = 80;
+const MAX_PARENT_META_CACHE = 400;
+const UUID_EXACT_REGEX = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
 export function clearModelCache() {
   cachedCliModel = null;
   cachedCliModelTime = 0;
   genMetaCache.clear();
+  parentMetaCache.clear();
+  workflowStepsCache.clear();
 }
 
 function readVarint(buf, offset) {
@@ -588,6 +595,489 @@ export function readConversationDbModel(convId, options = {}) {
   };
 }
 
+function parseProtobufTimestampMs(buf, start, end) {
+  let pos = start;
+  let seconds = 0;
+  let nanos = 0;
+  while (pos < end) {
+    const tag = readVarint(buf, pos);
+    if (!tag) break;
+    pos = tag.next;
+    const field = Math.floor(tag.value / 8);
+    const wire = tag.value & 7;
+    if (wire === 0 && (field === 1 || field === 2)) {
+      const v = readVarint(buf, pos);
+      if (!v) break;
+      if (field === 1) seconds = v.value;
+      else nanos = v.value;
+      pos = v.next;
+    } else {
+      pos = skipWireField(buf, pos, wire);
+    }
+  }
+  return seconds > 0 ? Math.floor(seconds * 1000 + nanos / 1e6) : 0;
+}
+
+/**
+ * 零拷贝解码 trajectory_metadata_blob 中的父会话与 Workflow 调用归属信息
+ */
+function parseTrajectoryParentMetaBlob(buf, convId = '') {
+  if (!Buffer.isBuffer(buf) || buf.length === 0) return null;
+  let pos = 0;
+  let parentCascadeId = '';
+  let rootCascadeId = '';
+  let wfParentId = '';
+  let wfStepIndex = 0;
+  let wfToolName = '';
+  let wfAgentLabel = '';
+
+  while (pos < buf.length) {
+    const tag = readVarint(buf, pos);
+    if (!tag) break;
+    pos = tag.next;
+    const field = Math.floor(tag.value / 8);
+    const wire = tag.value & 7;
+
+    if (wire === 2 && (field === 5 || field === 6 || field === 12)) {
+      const len = readVarint(buf, pos);
+      if (!len) break;
+      const end = Math.min(buf.length, len.next + len.value);
+      if (field === 5) {
+        parentCascadeId = buf.toString('utf8', len.next, end).trim();
+      } else if (field === 6) {
+        rootCascadeId = buf.toString('utf8', len.next, end).trim();
+      } else if (field === 12) {
+        let p2 = len.next;
+        while (p2 < end) {
+          const t2 = readVarint(buf, p2);
+          if (!t2) break;
+          p2 = t2.next;
+          const f2 = Math.floor(t2.value / 8);
+          const w2 = t2.value & 7;
+          if (f2 === 1 && w2 === 2) {
+            const l2 = readVarint(buf, p2);
+            if (!l2) break;
+            const e2 = Math.min(end, l2.next + l2.value);
+            let p3 = l2.next;
+            while (p3 < e2) {
+              const t3 = readVarint(buf, p3);
+              if (!t3) break;
+              p3 = t3.next;
+              const f3 = Math.floor(t3.value / 8);
+              const w3 = t3.value & 7;
+              if (f3 === 2 && w3 === 0) {
+                const v3 = readVarint(buf, p3);
+                if (!v3) break;
+                wfStepIndex = v3.value;
+                p3 = v3.next;
+              } else if (w3 === 2 && (f3 === 1 || f3 === 3 || f3 === 4)) {
+                const l3 = readVarint(buf, p3);
+                if (!l3) break;
+                const e3 = Math.min(e2, l3.next + l3.value);
+                if (f3 === 1) {
+                  wfParentId = buf.toString('utf8', l3.next, e3).trim();
+                } else if (f3 === 4) {
+                  wfAgentLabel = buf.toString('utf8', l3.next, e3).trim();
+                } else if (f3 === 3) {
+                  let p4 = l3.next;
+                  while (p4 < e3) {
+                    const t4 = readVarint(buf, p4);
+                    if (!t4) break;
+                    p4 = t4.next;
+                    const f4 = Math.floor(t4.value / 8);
+                    const w4 = t4.value & 7;
+                    if (f4 === 2 && w4 === 2) {
+                      const l4 = readVarint(buf, p4);
+                      if (!l4) break;
+                      const e4 = Math.min(e3, l4.next + l4.value);
+                      wfToolName = buf.toString('utf8', l4.next, e4).trim();
+                      p4 = e4;
+                    } else {
+                      p4 = skipWireField(buf, p4, w4);
+                    }
+                  }
+                }
+                p3 = e3;
+              } else {
+                p3 = skipWireField(buf, p3, w3);
+              }
+            }
+            p2 = e2;
+          } else {
+            p2 = skipWireField(buf, p2, w2);
+          }
+        }
+      }
+      pos = end;
+    } else {
+      pos = skipWireField(buf, pos, wire);
+    }
+  }
+
+  const effectiveParentId = parentCascadeId || wfParentId || '';
+  const selfLower = String(convId || '').toLowerCase();
+  const isChild = Boolean(
+    (effectiveParentId && effectiveParentId.toLowerCase() !== selfLower) ||
+    (rootCascadeId && rootCascadeId.toLowerCase() !== selfLower)
+  );
+
+  return {
+    parentId: effectiveParentId,
+    rootId: rootCascadeId,
+    spawnStepIndex: wfStepIndex,
+    parentToolName: wfToolName,
+    agentLabel: wfAgentLabel,
+    isChild,
+    isWorkflowChild: wfToolName === 'run_workflow',
+  };
+}
+
+/**
+ * 只读读取会话 SQLite trajectory_metadata_blob，用于精准识别 Workflow / Subagent 归属关系
+ */
+export function readConversationParentMeta(
+  convId,
+  { conversationsDir = CONVERSATIONS_DIR, useCache = true } = {}
+) {
+  if (!DatabaseSync || !convId || !conversationsDir) return null;
+  const dbPath = path.join(conversationsDir, `${convId}.db`);
+  const sig = getConversationDbSignature(convId, conversationsDir);
+  if (!sig) return null;
+
+  const cacheKey = `${conversationsDir}|${convId}`;
+  if (useCache) {
+    const cached = parentMetaCache.get(cacheKey);
+    if (cached && cached.sig === sig) {
+      return cached.info;
+    }
+  }
+
+  let db = null;
+  let info = null;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const row = db.prepare('SELECT data FROM trajectory_metadata_blob LIMIT 1').get();
+    if (row?.data) {
+      const buf = Buffer.isBuffer(row.data) ? row.data : Buffer.from(row.data);
+      info = parseTrajectoryParentMetaBlob(buf, convId);
+    }
+  } catch {
+    // 忽略旧版本缺失表或并发锁冲突
+  } finally {
+    if (db) {
+      try {
+        db.close();
+      } catch {}
+    }
+  }
+
+  if (useCache) {
+    if (parentMetaCache.size >= MAX_PARENT_META_CACHE) {
+      const oldestKey = parentMetaCache.keys().next().value;
+      parentMetaCache.delete(oldestKey);
+    }
+    parentMetaCache.set(cacheKey, { sig, info });
+  }
+  return info;
+}
+
+/**
+ * 递归遍历 run_workflow 步骤渲染树（f140.f2.f3），提取所有已派发的子代理节点
+ */
+function collectWorkflowAgentsFromRenderNode(buf, start, end, out, seenIds, depth = 0) {
+  if (depth > 8 || start >= end) return;
+  let pos = start;
+  while (pos < end) {
+    const tag = readVarint(buf, pos);
+    if (!tag) break;
+    pos = tag.next;
+    const field = Math.floor(tag.value / 8);
+    const wire = tag.value & 7;
+
+    if (wire === 2 && field === 10) {
+      const len = readVarint(buf, pos);
+      if (!len) break;
+      const subEnd = Math.min(end, len.next + len.value);
+      // 检查当前 f10 子项是直接的 Agent 节点（f4）还是嵌套分组容器（f5 -> f1）
+      let p = len.next;
+      while (p < subEnd) {
+        const t2 = readVarint(buf, p);
+        if (!t2) break;
+        p = t2.next;
+        const f2 = Math.floor(t2.value / 8);
+        const w2 = t2.value & 7;
+        if (w2 === 2 && f2 === 4) {
+          const l4 = readVarint(buf, p);
+          if (!l4) break;
+          const e4 = Math.min(subEnd, l4.next + l4.value);
+          let agId = '';
+          let agRole = '';
+          let agType = '';
+          let p4 = l4.next;
+          while (p4 < e4) {
+            const t4 = readVarint(buf, p4);
+            if (!t4) break;
+            p4 = t4.next;
+            const f4 = Math.floor(t4.value / 8);
+            const w4 = t4.value & 7;
+            if (w4 === 2 && (f4 === 1 || f4 === 2 || f4 === 3)) {
+              const sLen = readVarint(buf, p4);
+              if (!sLen) break;
+              const sEnd = Math.min(e4, sLen.next + sLen.value);
+              const sVal = buf.toString('utf8', sLen.next, sEnd).trim();
+              if (f4 === 1) agId = sVal;
+              else if (f4 === 2) agRole = sVal;
+              else if (f4 === 3) agType = sVal;
+              p4 = sEnd;
+            } else {
+              p4 = skipWireField(buf, p4, w4);
+            }
+          }
+          if (agId && UUID_EXACT_REGEX.test(agId) && !seenIds.has(agId)) {
+            seenIds.add(agId);
+            out.push({
+              id: agId,
+              role: agRole || 'Workflow Agent',
+              typeName: agType || 'research',
+            });
+          }
+          p = e4;
+        } else if (w2 === 2 && f2 === 5) {
+          const l5 = readVarint(buf, p);
+          if (!l5) break;
+          const e5 = Math.min(subEnd, l5.next + l5.value);
+          let p5 = l5.next;
+          while (p5 < e5) {
+            const t5 = readVarint(buf, p5);
+            if (!t5) break;
+            p5 = t5.next;
+            const f5 = Math.floor(t5.value / 8);
+            const w5 = t5.value & 7;
+            if (w5 === 2 && f5 === 1) {
+              const l1 = readVarint(buf, p5);
+              if (!l1) break;
+              const e1 = Math.min(e5, l1.next + l1.value);
+              collectWorkflowAgentsFromRenderNode(buf, l1.next, e1, out, seenIds, depth + 1);
+              p5 = e1;
+            } else {
+              p5 = skipWireField(buf, p5, w5);
+            }
+          }
+          p = e5;
+        } else {
+          p = skipWireField(buf, p, w2);
+        }
+      }
+      pos = subEnd;
+    } else {
+      pos = skipWireField(buf, pos, wire);
+    }
+  }
+}
+
+/**
+ * 解析单条 run_workflow 工具步骤（step_type=132）的 step_payload，返回派发的子代理列表
+ */
+function parseWorkflowStepPayload(buf, stepIdx = 0, stepStatus = 0) {
+  if (!Buffer.isBuffer(buf) || !buf.includes('run_workflow')) return [];
+
+  let pos = 0;
+  let toolName = '';
+  let spawnTimeMs = 0;
+  let description = '';
+  let renderTreeRange = null;
+
+  while (pos < buf.length) {
+    const tag = readVarint(buf, pos);
+    if (!tag) break;
+    pos = tag.next;
+    const field = Math.floor(tag.value / 8);
+    const wire = tag.value & 7;
+
+    if (wire === 2 && field === 5) {
+      const len = readVarint(buf, pos);
+      if (!len) break;
+      const end = Math.min(buf.length, len.next + len.value);
+      let p = len.next;
+      while (p < end) {
+        const t2 = readVarint(buf, p);
+        if (!t2) break;
+        p = t2.next;
+        const f2 = Math.floor(t2.value / 8);
+        const w2 = t2.value & 7;
+        if (w2 === 2 && f2 === 1) {
+          const l1 = readVarint(buf, p);
+          if (!l1) break;
+          const e1 = Math.min(end, l1.next + l1.value);
+          spawnTimeMs = parseProtobufTimestampMs(buf, l1.next, e1);
+          p = e1;
+        } else if (w2 === 2 && f2 === 4) {
+          const l4 = readVarint(buf, p);
+          if (!l4) break;
+          const e4 = Math.min(end, l4.next + l4.value);
+          let p4 = l4.next;
+          while (p4 < e4) {
+            const t4 = readVarint(buf, p4);
+            if (!t4) break;
+            p4 = t4.next;
+            const f4 = Math.floor(t4.value / 8);
+            const w4 = t4.value & 7;
+            if (w4 === 2 && f4 === 2) {
+              const sLen = readVarint(buf, p4);
+              if (!sLen) break;
+              const sEnd = Math.min(e4, sLen.next + sLen.value);
+              toolName = buf.toString('utf8', sLen.next, sEnd).trim();
+              p4 = sEnd;
+            } else {
+              p4 = skipWireField(buf, p4, w4);
+            }
+          }
+          p = e4;
+        } else {
+          p = skipWireField(buf, p, w2);
+        }
+      }
+      pos = end;
+    } else if (wire === 2 && field === 140) {
+      const len = readVarint(buf, pos);
+      if (!len) break;
+      const end = Math.min(buf.length, len.next + len.value);
+      let p = len.next;
+      while (p < end) {
+        const t2 = readVarint(buf, p);
+        if (!t2) break;
+        p = t2.next;
+        const f2 = Math.floor(t2.value / 8);
+        const w2 = t2.value & 7;
+        if (w2 === 2 && f2 === 1) {
+          const l1 = readVarint(buf, p);
+          if (!l1) break;
+          const e1 = Math.min(end, l1.next + l1.value);
+          let kvKey = '';
+          let kvVal = '';
+          let pk = l1.next;
+          while (pk < e1) {
+            const tk = readVarint(buf, pk);
+            if (!tk) break;
+            pk = tk.next;
+            const fk = Math.floor(tk.value / 8);
+            const wk = tk.value & 7;
+            if (wk === 2 && (fk === 1 || fk === 2)) {
+              const sl = readVarint(buf, pk);
+              if (!sl) break;
+              const se = Math.min(e1, sl.next + sl.value);
+              const sv = buf.toString('utf8', sl.next, se);
+              if (fk === 1) kvKey = sv;
+              else kvVal = sv;
+              pk = se;
+            } else {
+              pk = skipWireField(buf, pk, wk);
+            }
+          }
+          if (kvKey === 'Description' && kvVal) description = kvVal.trim();
+          p = e1;
+        } else if (w2 === 2 && f2 === 2) {
+          const l2 = readVarint(buf, p);
+          if (!l2) break;
+          const e2 = Math.min(end, l2.next + l2.value);
+          let p2 = l2.next;
+          while (p2 < e2) {
+            const t3 = readVarint(buf, p2);
+            if (!t3) break;
+            p2 = t3.next;
+            const f3 = Math.floor(t3.value / 8);
+            const w3 = t3.value & 7;
+            if (w3 === 2 && f3 === 3) {
+              const l3 = readVarint(buf, p2);
+              if (!l3) break;
+              const e3 = Math.min(e2, l3.next + l3.value);
+              renderTreeRange = { start: l3.next, end: e3 };
+              p2 = e3;
+            } else {
+              p2 = skipWireField(buf, p2, w3);
+            }
+          }
+          p = e2;
+        } else {
+          p = skipWireField(buf, p, w2);
+        }
+      }
+      pos = end;
+    } else {
+      pos = skipWireField(buf, pos, wire);
+    }
+  }
+
+  // 严格校验工具名为 run_workflow，避免 read_file 读到含 run_workflow 字样的文档产生误报
+  if (toolName !== 'run_workflow' || !renderTreeRange) return [];
+
+  const agents = [];
+  const seenIds = new Set();
+  collectWorkflowAgentsFromRenderNode(buf, renderTreeRange.start, renderTreeRange.end, agents, seenIds, 0);
+  return agents.map((ag) => ({
+    ...ag,
+    spawnStepIndex: stepIdx,
+    spawnTimeMs,
+    workflowStepStatus: stepStatus,
+    workflowDescription: description,
+  }));
+}
+
+/**
+ * 从父会话 SQLite steps 表实时读取全部 run_workflow 派发的子代理（支持运行中实时可见）
+ */
+export function readWorkflowSubagentsFromDb(
+  mainConvId,
+  { conversationsDir = CONVERSATIONS_DIR, useCache = true } = {}
+) {
+  if (!DatabaseSync || !mainConvId || !conversationsDir) return [];
+  const dbPath = path.join(conversationsDir, `${mainConvId}.db`);
+  const sig = getConversationDbSignature(mainConvId, conversationsDir);
+  if (!sig) return [];
+
+  const cacheKey = `${conversationsDir}|${mainConvId}`;
+  if (useCache) {
+    const cached = workflowStepsCache.get(cacheKey);
+    if (cached && cached.sig === sig) {
+      return cached.agents;
+    }
+  }
+
+  let db = null;
+  const agents = [];
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const rows = db
+      .prepare('SELECT idx, status, step_payload FROM steps WHERE step_type = 132 ORDER BY idx ASC')
+      .all();
+    for (const row of rows) {
+      if (!row?.step_payload) continue;
+      const buf = Buffer.isBuffer(row.step_payload) ? row.step_payload : Buffer.from(row.step_payload);
+      const parsed = parseWorkflowStepPayload(buf, row.idx || 0, row.status || 0);
+      for (const ag of parsed) {
+        agents.push(ag);
+      }
+    }
+  } catch {
+    // 忽略并发锁或结构差异，交由日志兜底链路处理
+  } finally {
+    if (db) {
+      try {
+        db.close();
+      } catch {}
+    }
+  }
+
+  if (useCache) {
+    if (workflowStepsCache.size >= MAX_GEN_META_CACHE) {
+      const oldestKey = workflowStepsCache.keys().next().value;
+      workflowStepsCache.delete(oldestKey);
+    }
+    workflowStepsCache.set(cacheKey, { sig, agents });
+  }
+  return agents;
+}
+
 export function getDefaultCliModel(force = false) {
   const now = Date.now();
   if (!force && cachedCliModel && now - cachedCliModelTime < 10_000) {
@@ -720,6 +1210,16 @@ export function formatSubagentModelInfo(rawModel, parentModelName, resolvedDispl
       model: eff ? `Hydrogen (${eff})` : 'Hydrogen',
       modelKey: 'hydrogen',
       modelBadge: eff ? `⚛️ Hydrogen · ${eff}` : '⚛️ Hydrogen',
+      modelDesc: displayTarget,
+      rawModel: raw,
+    };
+  }
+  if (targetLower.includes('neon')) {
+    const eff = extractEffortLabel(displayTarget);
+    return {
+      model: eff ? `Neon (${eff})` : 'Neon',
+      modelKey: 'neon',
+      modelBadge: eff ? `🌟 Neon · ${eff}` : '🌟 Neon',
       modelDesc: displayTarget,
       rawModel: raw,
     };

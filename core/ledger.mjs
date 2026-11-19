@@ -19,11 +19,12 @@ import {
   getModelPricing,
   normalizeCanonicalModel,
   readConversationGenMetadata,
+  readConversationParentMeta,
 } from './models.mjs';
 
 const SETTINGS_FILE = path.join(MONITOR_DATA_DIR, 'profile_settings.json');
 const LEDGER_CACHE_FILE = path.join(MONITOR_DATA_DIR, 'ledger_cache_v1.json');
-const CACHE_SCHEMA_VERSION = 3;
+const CACHE_SCHEMA_VERSION = 4;
 const MAX_SPEED_SAMPLES_PER_CONV = 60;
 const MAX_SPEED_SAMPLES_PER_MODEL = 200;
 const MEMORY_TTL_MS = 3000;
@@ -307,6 +308,10 @@ function scanSingleConversation(job) {
     if (!checkedFirst) {
       checkedFirst = true;
       isSubagent = Boolean(item.source === 'SYSTEM' || item.type === 'SYSTEM_MESSAGE');
+      // 兼容首行为 USER_INPUT 的 Dynamic Workflow 子代理，避免被计入顶层主会话数
+      if (!isSubagent && readConversationParentMeta(convId, { conversationsDir, useCache: false })?.isChild) {
+        isSubagent = true;
+      }
     }
 
     let itemDateKey = '';

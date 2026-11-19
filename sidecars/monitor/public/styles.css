@@ -603,6 +603,17 @@ button:active {
   font-weight: 600;
 }
 
+.workflow-tag {
+  font-size: 9.5px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(56, 189, 248, 0.14);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
 .model-tag {
   font-size: 9.5px;
   padding: 1px 6px;
@@ -636,6 +647,12 @@ button:active {
   background: rgba(158, 206, 106, 0.16);
   color: #9ece6a;
   border: 1px solid rgba(158, 206, 106, 0.35);
+}
+
+.model-tag.model-neon {
+  background: rgba(250, 204, 21, 0.16);
+  color: #facc15;
+  border: 1px solid rgba(250, 204, 21, 0.35);
 }
 
 .model-tag.model-orchestrator {

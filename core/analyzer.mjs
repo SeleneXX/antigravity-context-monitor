@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { BRAIN_DIR, DEFAULT_MAX_WINDOW } from './constants.mjs';
-import { clearModelCache, classifyCacheHit, computeMedian } from './models.mjs';
+import { clearModelCache, classifyCacheHit, computeMedian, readConversationParentMeta } from './models.mjs';
 import { parseTranscript, clearTranscriptCache } from './transcript.mjs';
 import { getSubagentsForConversation, readSwarmContext, clearSubagentCache } from './subagents.mjs';
 import {
@@ -29,7 +29,20 @@ function readFirstJsonHeader(filePath) {
     const nlIdx = head.indexOf('\n');
     const firstLine = (nlIdx >= 0 ? head.slice(0, nlIdx) : head).trim();
     if (!firstLine) return null;
-    return JSON.parse(firstLine);
+    try {
+      return JSON.parse(firstLine);
+    } catch {
+      // 用户首条消息超过 1KB 时首行会被截断，回退从头部字段直接提取 source / type
+      const srcMatch = firstLine.match(/"source"\s*:\s*"([^"]+)"/);
+      const typeMatch = firstLine.match(/"type"\s*:\s*"([^"]+)"/);
+      if (srcMatch || typeMatch) {
+        return {
+          source: srcMatch ? srcMatch[1] : '',
+          type: typeMatch ? typeMatch[1] : '',
+        };
+      }
+      return null;
+    }
   } catch {
     return null;
   } finally {
@@ -72,6 +85,11 @@ export function getConversations({ force = false } = {}) {
     try {
       const firstObj = readFirstJsonHeader(logPath);
       if (!firstObj || firstObj.source === 'SYSTEM' || firstObj.type === 'SYSTEM_MESSAGE') {
+        continue;
+      }
+      // run_workflow 派发的子代理首行为 USER_INPUT，需结合 SQLite trajectory_metadata_blob 排除
+      const parentMeta = readConversationParentMeta(entry.name);
+      if (parentMeta?.isChild) {
         continue;
       }
       const stat = fs.statSync(logPath);
@@ -165,6 +183,7 @@ export function getSessionSnapshot({
         combinedContextPercent: 0,
         combinedTokPerSec: 0,
         combinedTps: 0,
+        combinedPeakTps: 0,
         combinedE2eTps: 0,
         combinedTtft: 0,
         combinedCompactions: 0,
@@ -194,6 +213,7 @@ export function getSessionSnapshot({
   const streamTpsSamples = [];
   const e2eTpsSamples = [];
   const ttftSamples = [];
+  let combinedPeakTps = stats.peakTps || stats.tps || stats.tokPerSec || 0;
   if ((stats.tps || stats.tokPerSec || 0) > 0) streamTpsSamples.push(stats.tps || stats.tokPerSec);
   if ((stats.e2eTps || 0) > 0) e2eTpsSamples.push(stats.e2eTps);
   if ((stats.ttft || 0) > 0) ttftSamples.push(stats.ttft);
@@ -212,6 +232,8 @@ export function getSessionSnapshot({
 
     const sTps = sa.tps || sa.tokPerSec || 0;
     if (sTps > 0) streamTpsSamples.push(sTps);
+    const sPeak = sa.peakTps || sTps;
+    if (sPeak > combinedPeakTps) combinedPeakTps = sPeak;
     if ((sa.e2eTps || 0) > 0) e2eTpsSamples.push(sa.e2eTps);
     if ((sa.ttft || 0) > 0) ttftSamples.push(sa.ttft);
   }
@@ -248,6 +270,7 @@ export function getSessionSnapshot({
     combinedContextPercent,
     combinedTokPerSec: combinedTps,
     combinedTps,
+    combinedPeakTps: Math.round(combinedPeakTps),
     combinedE2eTps,
     combinedTtft,
     combinedCompactions,
@@ -268,8 +291,19 @@ export function getSessionSnapshot({
         }
       : null;
 
+  const workflowAgents = subagents.filter((sa) => sa.isWorkflow);
+  const workflowInfo =
+    workflowAgents.length > 0
+      ? {
+          totalAgents: workflowAgents.length,
+          running: workflowAgents.filter((s) => s.status === 'RUNNING').length,
+          done: workflowAgents.filter((s) => s.status === 'DONE').length,
+          stopped: workflowAgents.filter((s) => s.status === 'STOPPED').length,
+        }
+      : null;
+
   // 移除内部私有索引字段后再序列化输出
-  const { _parentIndex, _lifecycle, _logMtimeMs, ...publicStats } = stats;
+  const { _parentIndex, _lifecycle, _latestPlannerModelId, _logMtimeMs, ...publicStats } = stats;
 
   return {
     conversationId: target.id,
@@ -278,6 +312,7 @@ export function getSessionSnapshot({
     maxWindow: activeMaxWindow,
     subagents,
     swarmInfo,
+    workflowInfo,
     allAgentsSummary,
   };
 }

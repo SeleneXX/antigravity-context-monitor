@@ -228,18 +228,18 @@
 
     const tpsVal = data.tps || data.streamingTps || data.tokPerSec || 0;
     const medTpsVal = data.recentTps || data.medianTps || tpsVal;
-    const e2eTpsVal = data.e2eTps || tpsVal;
+    const peakTpsVal = data.peakTps || medTpsVal || tpsVal;
     document.getElementById('cardTps').textContent = tpsVal > 0 ? `${tpsVal} tok/s` : '--';
     document.getElementById('cardTpsSub').textContent =
       tpsVal > 0
-        ? `近5步中位: ${medTpsVal} tok/s · 端到端: ${e2eTpsVal} tok/s`
-        : '近5步中位: -- · 端到端: --';
+        ? `近5步中位: ${medTpsVal} tok/s · 峰值: ${peakTpsVal} tok/s`
+        : '近5步中位: -- · 峰值: --';
     const tileTpsEl = document.getElementById('tileTps');
     if (tileTpsEl) {
       const srcNote = data.speedSource === 'sqlite' ? 'SQLite 原生实测' : (data.speedSource === 'estimated' ? '日志时间戳估算' : '暂无样本');
       tileTpsEl.setAttribute(
         'title',
-        `最新流式: ${tpsVal} tok/s | 历史峰值: ${data.peakTps || tpsVal} tok/s | 全程均值: ${data.sessionAvgTps || tpsVal} tok/s | 数据源: ${srcNote}`
+        `最新纯流式: ${tpsVal} tok/s | 近5步中位: ${medTpsVal} tok/s | 历史峰值: ${peakTpsVal} tok/s | 全程流式均值: ${data.sessionAvgTps || tpsVal} tok/s | 数据源: ${srcNote}`
       );
     }
 
@@ -268,9 +268,9 @@
     document.getElementById('cardAllOutputBreakdown').textContent = `🧠 思考: ${formatNumber(summary.combinedThinkingTokens || data.sessionThinkingTokens || 0)} · 💬 正文: ${formatNumber(summary.combinedResponseTokens || data.sessionResponseTokens || 0)}`;
 
     const allTpsVal = summary.combinedTps || summary.combinedTokPerSec || tpsVal;
-    const allE2eVal = summary.combinedE2eTps || e2eTpsVal || allTpsVal;
+    const allPeakVal = summary.combinedPeakTps || peakTpsVal || allTpsVal;
     document.getElementById('cardAllTps').textContent = allTpsVal > 0 ? `${allTpsVal} tok/s` : '--';
-    document.getElementById('cardAllTpsSub').textContent = `端到端: ${allE2eVal > 0 ? allE2eVal + ' tok/s' : '--'} · 主 + ${summary.subagentsCount ?? subList.length} 个 Subagents`;
+    document.getElementById('cardAllTpsSub').textContent = `集群峰值: ${allPeakVal > 0 ? allPeakVal + ' tok/s' : '--'} · 主 + ${summary.subagentsCount ?? subList.length} 个 Subagents`;
 
     const allTtftVal = summary.combinedTtft > 0 ? `${summary.combinedTtft}s` : data.ttft > 0 ? `${data.ttft}s` : '--';
     document.getElementById('cardAllTtft').textContent = allTtftVal;
@@ -294,9 +294,9 @@
       container.innerHTML = `
         <div class="subagent-empty">
           <div class="subagent-empty-icon">🛡️</div>
-          <div class="subagent-empty-title">当前会话未唤起 Subagent / Swarm</div>
+          <div class="subagent-empty-title">当前会话未唤起 Subagent / Workflow / Swarm</div>
           <div class="subagent-empty-desc">
-            所有任务均在主 Agent 上下文中完成。当唤起 <code>invoke_subagent</code> 或启用 <code>Swarm Mode</code> 时，各子智能体与 Worker 的独立 Token 消耗、看板待命态与真实模型层级将在此实时呈现。
+            所有任务均在主 Agent 上下文中完成。当唤起 <code>invoke_subagent</code>、<code>run_workflow</code> 或启用 <code>Swarm Mode</code> 时，各子智能体与 Worker 的独立 Token 消耗、看板待命态与真实模型层级将在此实时呈现。
           </div>
         </div>
       `;
@@ -327,7 +327,7 @@
         const speedHtml = speedVal > 0 ? `${speedVal} tok/s` : '--';
         const ttftHtml = sa.ttft > 0 ? ` <span style="font-size:10px;color:var(--accent-blue)">(${sa.ttft}s)</span>` : '';
         const speedTitle = speedVal > 0
-          ? `最新纯流式: ${speedVal} tok/s · 近5步中位: ${sa.medianTps || speedVal} tok/s · 端到端: ${sa.e2eTps || speedVal} tok/s`
+          ? `最新纯流式: ${speedVal} tok/s · 近5步中位: ${sa.medianTps || speedVal} tok/s · 峰值: ${sa.peakTps || speedVal} tok/s`
           : '暂无速度样本';
         const saRate = sa.cacheHitRate || 0;
         const saTier = getCacheTier(saRate, sa.sessionCacheTokens, sa.cacheGrade);
@@ -335,12 +335,17 @@
           sa.workspaceMode && sa.workspaceMode !== 'inherit'
             ? `<span class="workspace-tag">${escapeHtml(sa.workspaceMode)}</span>`
             : '';
+        const wfTagHtml = sa.isWorkflow
+          ? `<span class="workflow-tag" title="${escapeHtml(sa.workflowDescription || 'Dynamic Workflow Agent')}">WORKFLOW</span>`
+          : '';
+        const roleIcon = sa.isSwarm ? '🐝' : sa.isWorkflow ? '🔀' : '🤖';
 
         return `
           <div class="subagent-card ${cardExtraClass}">
             <div class="subagent-header">
               <div class="subagent-title">
-                <span>${sa.isSwarm ? '🐝' : '🤖'} ${escapeHtml(sa.role || 'Subagent Worker')}</span>
+                <span>${roleIcon} ${escapeHtml(sa.role || 'Subagent Worker')}</span>
+                ${wfTagHtml}
                 <span class="type-tag">${escapeHtml(sa.typeName || 'subagent')}</span>
                 ${wsTagHtml}
                 <span class="model-tag model-${escapeHtml(sa.modelKey || 'flash')}">${escapeHtml(sa.modelBadge || sa.model || '⚡ Flash')}</span>
@@ -488,7 +493,7 @@
         const respTok = item.response || 0;
         const stepSpeedTip =
           item.streamingTps > 0
-            ? `纯流式: ${item.streamingTps} tok/s · 端到端: ${item.e2eTps || item.streamingTps} tok/s${item.streamingSec ? ` · 流式耗时 ${item.streamingSec}s` : ''}`
+            ? `纯流式: ${item.streamingTps} tok/s${item.streamingSec ? ` · 流式耗时 ${item.streamingSec}s` : ''}${item.ttftSec !== null && item.ttftSec !== undefined ? ` · TTFT ${item.ttftSec}s` : ''}`
             : '';
         const stepSpeedHtml =
           item.streamingTps > 0
@@ -1119,11 +1124,11 @@
     document.getElementById('speedTrendCard').style.display = 'block';
 
     const metricConfig = {
-      streamingTps: { field: 'medianStreamingTps', unit: ' tok/s', higherBetter: true, label: '纯流式 TPS' },
-      e2eTps: { field: 'medianE2eTps', unit: ' tok/s', higherBetter: true, label: '端到端 TPS' },
-      ttftSec: { field: 'medianTtftSec', unit: 's', higherBetter: false, label: '首字延迟 TTFT' },
-      durationSec: { field: 'medianDurationSec', unit: 's', higherBetter: false, label: '单次总耗时' },
-    }[metric] || { field: 'medianStreamingTps', unit: ' tok/s', higherBetter: true, label: '纯流式 TPS' };
+      streamingTps: { field: 'medianStreamingTps', seriesKey: 'streamingTps', unit: ' tok/s', higherBetter: true, label: '纯流式 TPS', refPrefix: '中位' },
+      p75StreamingTps: { field: 'p75StreamingTps', seriesKey: 'streamingTps', unit: ' tok/s', higherBetter: true, label: 'P75 峰值 TPS', refPrefix: 'P75' },
+      ttftSec: { field: 'medianTtftSec', seriesKey: 'ttftSec', unit: 's', higherBetter: false, label: '首字延迟 TTFT', refPrefix: '中位' },
+      durationSec: { field: 'medianDurationSec', seriesKey: 'durationSec', unit: 's', higherBetter: false, label: '单次总耗时', refPrefix: '中位' },
+    }[metric] || { field: 'medianStreamingTps', seriesKey: 'streamingTps', unit: ' tok/s', higherBetter: true, label: '纯流式 TPS', refPrefix: '中位' };
 
     const validItems = list.filter((item) => item[metricConfig.field] !== null && item[metricConfig.field] > 0);
     validItems.sort((a, b) =>
@@ -1150,10 +1155,9 @@
 
         const subParts = [];
         if (metric !== 'streamingTps' && item.medianStreamingTps > 0) subParts.push(`纯流式 ${item.medianStreamingTps} tok/s`);
-        if (metric !== 'e2eTps' && item.medianE2eTps > 0) subParts.push(`端到端 ${item.medianE2eTps} tok/s`);
+        if (metric !== 'p75StreamingTps' && item.p75StreamingTps > 0) subParts.push(`P75峰值 ${item.p75StreamingTps} tok/s`);
         if (metric !== 'ttftSec' && item.medianTtftSec !== null) subParts.push(`TTFT ${item.medianTtftSec}s`);
         if (metric !== 'durationSec' && item.medianDurationSec !== null) subParts.push(`总耗时 ${item.medianDurationSec}s`);
-        if (item.p75StreamingTps > 0) subParts.push(`P75流式 ${item.p75StreamingTps} tok/s`);
 
         return `
           <div class="speed-rank-row ${selected ? 'selected' : ''}" data-model="${escapeHtml(item.modelKey)}">
@@ -1181,7 +1185,7 @@
 
     const selectedItem = ordered.find((x) => x.modelKey === ledgerState.selectedModelKey) || ordered[0];
     document.getElementById('speedTrendTitle').textContent = `${selectedItem.modelLabel} · ${metricConfig.label} 趋势`;
-    document.getElementById('speedTrendSub').textContent = `展示最近 ${selectedItem.recentSeries.length} 条实测记录 · 虚线为近 ${selectedItem.sampleCount} 次中位数`;
+    document.getElementById('speedTrendSub').textContent = `展示最近 ${selectedItem.recentSeries.length} 条实测记录 · 虚线为近 ${selectedItem.sampleCount} 次${metricConfig.refPrefix}值`;
     requestAnimationFrame(() => drawSpeedTrendCanvas(selectedItem, metricConfig));
   }
 
@@ -1199,7 +1203,8 @@
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, width, height);
 
-    const series = (item.recentSeries || []).filter((pt) => pt[ledgerState.speedMetric] !== null && pt[ledgerState.speedMetric] > 0);
+    const seriesKey = metricConfig.seriesKey || ledgerState.speedMetric;
+    const series = (item.recentSeries || []).filter((pt) => pt[seriesKey] !== null && pt[seriesKey] > 0);
     if (!series.length) {
       ctx.fillStyle = '#8b8e9f';
       ctx.font = '12px sans-serif';
@@ -1207,7 +1212,7 @@
       return;
     }
 
-    const vals = series.map((pt) => Number(pt[ledgerState.speedMetric]));
+    const vals = series.map((pt) => Number(pt[seriesKey]));
     const maxVal = Math.max(0.1, ...vals) * 1.15;
     const minVal = 0;
 
@@ -1230,7 +1235,7 @@
       ctx.restore();
       ctx.fillStyle = '#facc15';
       ctx.font = '10px sans-serif';
-      ctx.fillText(`中位 ${medVal}${metricConfig.unit}`, padX, Math.max(11, medY - 4));
+      ctx.fillText(`${metricConfig.refPrefix || '中位'} ${medVal}${metricConfig.unit}`, padX, Math.max(11, medY - 4));
     }
 
     ctx.beginPath();

@@ -26,6 +26,36 @@ const UUID_REGEX_GLOBAL = /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0
 const SENDER_UUID_REGEX = /sender=([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})(?:\/([^\s\n"]+))?/i;
 const BG_TASK_START_REGEX = /background task with task id:\s*([^\s\n"]+)/i;
 const BG_TASK_FINISH_REGEX = /Task id ["']?([^"'\s\n]+)["']? finished/i;
+const WORKFLOW_AGENT_LINE_REGEX =
+  /^\s*-\s*\[agent:([^\]]+)\]\s+(.+?):\s+(done|failed|error|cancelled|canceled|timeout|running)\s+\(([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\)/gim;
+const WORKFLOW_TITLE_REGEX = /Workflow\s+"([^"\n]+)"/;
+
+/**
+ * 从 run_workflow 输出文本（GENERIC / SYSTEM_MESSAGE / task-*.log）中提取子代理记录作为文本兜底
+ */
+export function extractWorkflowAgentsFromText(text, { spawnStepIndex = 0, spawnTimeMs = 0, workflowDescription = '' } = {}) {
+  if (!text || !text.includes('[agent:')) return [];
+  let desc = workflowDescription || '';
+  if (!desc) {
+    const titleMatch = text.match(WORKFLOW_TITLE_REGEX);
+    if (titleMatch && titleMatch[1]) desc = titleMatch[1].trim();
+  }
+  const agents = [];
+  WORKFLOW_AGENT_LINE_REGEX.lastIndex = 0;
+  let m;
+  while ((m = WORKFLOW_AGENT_LINE_REGEX.exec(text)) !== null) {
+    agents.push({
+      id: m[4],
+      typeName: cleanStr(m[1]) || 'research',
+      role: cleanStr(m[2]) || 'Workflow Agent',
+      wfStatus: String(m[3] || '').toLowerCase(),
+      spawnStepIndex,
+      spawnTimeMs,
+      workflowDescription: desc,
+    });
+  }
+  return agents;
+}
 
 // 基于文件 mtimeMs + size 的内存解析缓存，避免对多 MB 历史日志每秒重复做 JSON.parse
 const transcriptCache = new Map();
@@ -151,6 +181,8 @@ function parseTranscriptFromDisk(logPath, stat, conversationsDir = CONVERSATIONS
   const parentIndex = {
     invokeCalls: [],
     discoveredSubIds: new Map(), // subId -> fallbackMeta
+    workflowSubagents: new Map(), // subId -> workflowMeta（从同步/异步日志提取的文本兜底）
+    workflowTaskLogs: [], // [{ logFile, spawnStepIndex, spawnTimeMs, workflowDescription }]
     dispatchesBySubId: new Map(),
     repliesBySubId: new Map(),
     killsBySubId: new Map(),
@@ -179,6 +211,10 @@ function parseTranscriptFromDisk(logPath, stat, conversationsDir = CONVERSATIONS
   let interruptedByRestart = false;
   let errorMessage = '';
   let pendingHasSwarmWait = false;
+  let pendingHasFinish = false;
+  let finishedByTool = false;
+  let pendingWorkflowCall = null;
+  let latestPlannerModelId = '';
   let pendingBatchRemaining = 0;
   let lastStepTimeMs = cycleStartTimeMs;
 
@@ -231,6 +267,23 @@ function parseTranscriptFromDisk(logPath, stat, conversationsDir = CONVERSATIONS
           parentIndex.globalKillTimeMs = itemTimeMs || stat.mtimeMs;
         }
       }
+      // 捕获异步后台 run_workflow 完成通知中的子代理列表
+      if (textContent.includes('[agent:') && textContent.includes('Workflow ')) {
+        const wfTaskStepMatch = senderMatch && senderMatch[2] ? senderMatch[2].match(/task-(\d+)/i) : null;
+        const wfSpawnStep = wfTaskStepMatch ? Number(wfTaskStepMatch[1]) : item.step_index || 0;
+        const wfAgents = extractWorkflowAgentsFromText(textContent, {
+          spawnStepIndex: wfSpawnStep,
+          spawnTimeMs: itemTimeMs || stat.mtimeMs,
+        });
+        for (const ag of wfAgents) {
+          if (ag.id && ag.id !== convId) {
+            parentIndex.workflowSubagents.set(ag.id, {
+              ...(parentIndex.workflowSubagents.get(ag.id) || {}),
+              ...ag,
+            });
+          }
+        }
+      }
     }
 
     // 3. 按步骤类型分类统计与状态机流转
@@ -238,6 +291,8 @@ function parseTranscriptFromDisk(logPath, stat, conversationsDir = CONVERSATIONS
       turns++;
       activeUserChars += textContent.length;
       pendingHasSwarmWait = false;
+      pendingHasFinish = false;
+      pendingWorkflowCall = null;
       pendingBatchRemaining = 0;
       errorMessage = '';
 
@@ -250,6 +305,8 @@ function parseTranscriptFromDisk(logPath, stat, conversationsDir = CONVERSATIONS
       }
     } else if (item.type === 'SYSTEM_MESSAGE') {
       pendingHasSwarmWait = false;
+      pendingHasFinish = false;
+      pendingWorkflowCall = null;
       pendingBatchRemaining = 0;
       errorMessage = '';
       if (textContent.includes('All your subagents and background tasks have been stopped')) {
@@ -287,6 +344,8 @@ function parseTranscriptFromDisk(logPath, stat, conversationsDir = CONVERSATIONS
       // 上下文压缩检查点：重置当前活跃窗口字符统计基线，并标记子代理处于压缩恢复态
       pendingCheckpoint = true;
       pendingHasSwarmWait = false;
+      pendingHasFinish = false;
+      pendingWorkflowCall = null;
       pendingBatchRemaining = 0;
       errorMessage = '';
       if (item.input_tokens || item.cache_read_tokens) {
@@ -300,6 +359,8 @@ function parseTranscriptFromDisk(logPath, stat, conversationsDir = CONVERSATIONS
       cycleState = 'COMPACTING';
     } else if (item.type === 'ERROR_MESSAGE') {
       pendingHasSwarmWait = false;
+      pendingHasFinish = false;
+      pendingWorkflowCall = null;
       pendingBatchRemaining = 0;
       if (textContent.includes('Please continue the task')) {
         cycleState = 'WORKING';
@@ -313,7 +374,7 @@ function parseTranscriptFromDisk(logPath, stat, conversationsDir = CONVERSATIONS
       interruptedByRestart = false;
       if (pendingBatchRemaining > 0) pendingBatchRemaining--;
 
-      // 捕获异步后台任务启动（如编译、自动化测试、长耗时脚本）
+      // 捕获异步后台任务启动（如编译、自动化测试、长耗时脚本、run_workflow）
       const bgMatch = textContent.match(BG_TASK_START_REGEX);
       if (item.status === 'RUNNING' || bgMatch) {
         const taskId = bgMatch ? bgMatch[1] : `${convId}/task-${item.step_index || i}`;
@@ -321,13 +382,46 @@ function parseTranscriptFromDisk(logPath, stat, conversationsDir = CONVERSATIONS
         const logFile = path.join(BRAIN_DIR, convId, '.system_generated', 'tasks', `${taskShortName}.log`);
         activeBgTasks.set(taskId, { logFile, startedAtMs: itemTimeMs || stat.mtimeMs });
         bgTaskStartedAfterReply = true;
+        if (pendingWorkflowCall) {
+          parentIndex.workflowTaskLogs.push({
+            logFile,
+            spawnStepIndex: item.step_index || pendingWorkflowCall.stepIndex || 0,
+            spawnTimeMs: itemTimeMs || pendingWorkflowCall.createdAtMs || stat.mtimeMs,
+            workflowDescription: pendingWorkflowCall.description || '',
+          });
+        }
       } else if (textContent.includes('No background tasks are currently running')) {
         activeBgTasks.clear();
         bgTaskStartedAfterReply = false;
       }
 
-      // 判定当前等待态：后台任务 > Swarm 看板挂起 (swarm_wait DONE) > 等待模型下一轮推理
-      if (item.status === 'RUNNING' && !nextItem) {
+      // 捕获同步完成的 run_workflow 输出中的子代理列表
+      if (textContent.includes('[agent:') && textContent.includes('Workflow ')) {
+        const wfAgents = extractWorkflowAgentsFromText(textContent, {
+          spawnStepIndex: item.step_index || pendingWorkflowCall?.stepIndex || 0,
+          spawnTimeMs: itemTimeMs || pendingWorkflowCall?.createdAtMs || stat.mtimeMs,
+          workflowDescription: pendingWorkflowCall?.description || '',
+        });
+        for (const ag of wfAgents) {
+          if (ag.id && ag.id !== convId) {
+            parentIndex.workflowSubagents.set(ag.id, {
+              ...(parentIndex.workflowSubagents.get(ag.id) || {}),
+              ...ag,
+            });
+          }
+        }
+      }
+
+      // 判定当前等待态：finish 工具自然收尾 > 后台任务 > Swarm 看板挂起 > 等待模型下一轮推理
+      if (
+        (pendingHasFinish && item.status === 'DONE' && pendingBatchRemaining === 0) ||
+        textContent.includes('Task is complete. Summarize what you did')
+      ) {
+        finishedByTool = true;
+        repliedInCycle = true;
+        pendingHasFinish = false;
+        cycleState = 'TURN_CONCLUDED';
+      } else if (item.status === 'RUNNING' && !nextItem) {
         cycleState = 'WAITING_BG_TASK';
       } else if (
         pendingHasSwarmWait &&
@@ -340,6 +434,9 @@ function parseTranscriptFromDisk(logPath, stat, conversationsDir = CONVERSATIONS
       }
     } else if (item.type === 'PLANNER_RESPONSE') {
       latestPlanner = item;
+      if (item.model && typeof item.model === 'string') {
+        latestPlannerModelId = item.model.trim();
+      }
       interruptedByRestart = false;
       errorMessage = '';
 
@@ -440,6 +537,8 @@ function parseTranscriptFromDisk(logPath, stat, conversationsDir = CONVERSATIONS
       // 解析工具调用（维护父子通信索引与子代理状态流转）
       const toolCalls = Array.isArray(item.tool_calls) ? item.tool_calls : [];
       pendingHasSwarmWait = toolCalls.some((tc) => tc?.name === 'swarm_wait');
+      pendingHasFinish = toolCalls.some((tc) => tc?.name === 'finish');
+      pendingWorkflowCall = null;
       pendingBatchRemaining = toolCalls.length;
       const hasInvokeCall = toolCalls.some((tc) => tc?.name === 'invoke_subagent');
       const stepReturnedUuids = [];
@@ -545,6 +644,12 @@ function parseTranscriptFromDisk(logPath, stat, conversationsDir = CONVERSATIONS
           }
         } else if (tc.name === 'schedule') {
           bgTaskStartedAfterReply = true;
+        } else if (tc.name === 'run_workflow') {
+          pendingWorkflowCall = {
+            stepIndex: item.step_index || 0,
+            createdAtMs: itemTimeMs,
+            description: cleanStr(args.Description || args.description),
+          };
         } else if (tc.name === 'swarm') {
           const action = String(args.action || args.Action || '').toLowerCase();
           const mName = cleanStr(args.name || args.Name);
@@ -604,40 +709,36 @@ function parseTranscriptFromDisk(logPath, stat, conversationsDir = CONVERSATIONS
           isMeasuredSpeed = true;
         }
 
-        if (output > 0 && (streamVal !== null || totalGenVal !== null)) {
+        if (output > 0 && streamVal !== null) {
+          const rawStreamTps = output / streamVal;
           const rawE2eTps = totalGenVal ? output / totalGenVal : null;
-          // 过滤短结构化工具调用的网络包 flush 脉冲，避免虚高 TPS 失真
-          const isSustainedStream = Boolean(
-            streamVal !== null &&
-            streamVal >= 0.8 &&
-            output >= 40 &&
-            !(streamVal < 1.2 && (ttftVal || 0) > streamVal * 3 && output / streamVal > 500)
-          );
+          // 过滤服务端整包缓冲后瞬间 flush 的工具调用脉冲（如 0.1s 吐出 600 tok），确保流式速率与峰值真实可靠
+          const isBufferedFlushSpike =
+            streamVal < 0.35 ||
+            (streamVal < 1.2 && (ttftVal || 0) > streamVal * 3 && rawStreamTps > 450);
 
-          if (isSustainedStream) {
-            const rawStreamTps = output / streamVal;
-            if (rawStreamTps > 0 && rawStreamTps <= 2000) {
-              stepStreamingTps = Number(rawStreamTps.toFixed(1));
-              stepE2eTps = rawE2eTps ? Number(rawE2eTps.toFixed(1)) : stepStreamingTps;
-              sustainedSpeedSamples.push({
-                step: item.step_index || 0,
-                streamingTps: stepStreamingTps,
-                e2eTps: stepE2eTps,
-                ttftSec: ttftVal,
-                streamingSec: streamVal,
-                durationSec: totalGenVal || streamVal,
-                outTok: output,
-              });
-            }
-          } else if (rawE2eTps && rawE2eTps > 0 && rawE2eTps <= 2000) {
-            stepStreamingTps = Number(rawE2eTps.toFixed(1));
-            stepE2eTps = stepStreamingTps;
+          if (!isBufferedFlushSpike && streamVal >= 0.6 && output >= 35 && rawStreamTps > 0 && rawStreamTps <= 1500) {
+            stepStreamingTps = Number(rawStreamTps.toFixed(1));
+            stepE2eTps = rawE2eTps ? Number(rawE2eTps.toFixed(1)) : stepStreamingTps;
+            sustainedSpeedSamples.push({
+              step: item.step_index || 0,
+              streamingTps: stepStreamingTps,
+              e2eTps: stepE2eTps,
+              ttftSec: ttftVal,
+              streamingSec: streamVal,
+              durationSec: totalGenVal || streamVal,
+              outTok: output,
+            });
+          } else if (!isBufferedFlushSpike && streamVal >= 0.35 && output >= 15 && rawStreamTps > 0 && rawStreamTps <= 800) {
+            // 新会话尚无长流式步骤时的兜底纯流式样本（严禁混入含 TTFT 的端到端速率）
+            stepStreamingTps = Number(rawStreamTps.toFixed(1));
+            stepE2eTps = rawE2eTps ? Number(rawE2eTps.toFixed(1)) : stepStreamingTps;
             shortBurstSamples.push({
               step: item.step_index || 0,
               streamingTps: stepStreamingTps,
               e2eTps: stepE2eTps,
               ttftSec: ttftVal,
-              streamingSec: totalGenVal || streamVal,
+              streamingSec: streamVal,
               durationSec: totalGenVal || streamVal,
               outTok: output,
             });
@@ -796,6 +897,7 @@ function parseTranscriptFromDisk(logPath, stat, conversationsDir = CONVERSATIONS
     lastStepTimeMs,
     cycleState,
     repliedInCycle,
+    finishedByTool,
     bgTaskStartedAfterReply,
     waitingForChildSubagent,
     interruptedByRestart,
@@ -808,6 +910,7 @@ function parseTranscriptFromDisk(logPath, stat, conversationsDir = CONVERSATIONS
   return {
     convId,
     dbFallbackModel: genMetaInfo?.latestDisplayName || '',
+    latestPlannerModelId,
     turns,
     steps,
     explicitModelSelected,
@@ -915,6 +1018,7 @@ function buildFinalStats(cached, logMtimeMs, maxWindowOverride = 0) {
       history: [],
       _parentIndex: cached.parentIndex,
       _lifecycle: cached.lifecycle,
+      _latestPlannerModelId: cached.latestPlannerModelId || '',
       _logMtimeMs: logMtimeMs,
     };
   }
@@ -1081,6 +1185,7 @@ function buildFinalStats(cached, logMtimeMs, maxWindowOverride = 0) {
     history,
     _parentIndex: cached.parentIndex,
     _lifecycle: cached.lifecycle,
+    _latestPlannerModelId: cached.latestPlannerModelId || '',
     _logMtimeMs: logMtimeMs,
   };
 }

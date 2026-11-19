@@ -139,7 +139,7 @@
         <div class="stat-tile" id="tileTps">
           <div class="label">TPS (当前流式速率)</div>
           <div class="value" id="cardTps" style="color:var(--accent-purple)">0 tok/s</div>
-          <div id="cardTpsSub" class="stat-sub">近5步中位: -- · 端到端: --</div>
+          <div id="cardTpsSub" class="stat-sub">近5步中位: -- · 峰值: --</div>
         </div>
         <div class="stat-tile" id="tileTtft">
           <div class="label">TTFT (首字响应延迟)</div>
@@ -162,7 +162,7 @@
         <div class="stat-tile" id="tileAllTps">
           <div class="label">集群流式 TPS (中位)</div>
           <div class="value" id="cardAllTps" style="color:var(--accent-purple)">0 tok/s</div>
-          <div id="cardAllTpsSub" class="stat-sub">端到端: -- · 主 + 0 个 Subagents</div>
+          <div id="cardAllTpsSub" class="stat-sub">集群峰值: -- · 主 + 0 个 Subagents</div>
         </div>
         <div class="stat-tile" id="tileAllTtft">
           <div class="label">集群真实 TTFT (中位)</div>
@@ -414,7 +414,7 @@
               </div>
               <div class="ledger-seg-group" id="speedMetricGroup">
                 <button type="button" class="ledger-seg-btn active" data-metric="streamingTps">纯流式 TPS</button>
-                <button type="button" class="ledger-seg-btn" data-metric="e2eTps">端到端 TPS</button>
+                <button type="button" class="ledger-seg-btn" data-metric="p75StreamingTps">P75 峰值 TPS</button>
                 <button type="button" class="ledger-seg-btn" data-metric="ttftSec">首字延迟 TTFT</button>
                 <button type="button" class="ledger-seg-btn" data-metric="durationSec">单次耗时</button>
               </div>

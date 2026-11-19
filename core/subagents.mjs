@@ -5,9 +5,10 @@ import {
   detectConversationModel,
   formatSubagentModelInfo,
   readConversationDbModel,
+  readWorkflowSubagentsFromDb,
   classifyCacheHit,
 } from './models.mjs';
-import { parseTranscript } from './transcript.mjs';
+import { parseTranscript, extractWorkflowAgentsFromText } from './transcript.mjs';
 
 const UUID_REGEX_GLOBAL = /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi;
 
@@ -69,6 +70,62 @@ export function readSwarmContext(mainConvId) {
   } catch {
     return empty;
   }
+}
+
+/**
+ * 读取 Dynamic Workflow (run_workflow) 派发的全部子代理（SQLite steps 实时表为主，transcript 与 task 日志双保险兜底）
+ */
+export function readWorkflowContext(mainConvId, parentIndex = null, force = false) {
+  const agentsById = new Map();
+  if (!mainConvId) return { agentsById, totalWorkflowAgents: 0 };
+
+  const upsert = (ag) => {
+    if (!ag || !ag.id || ag.id === mainConvId) return;
+    const prev = agentsById.get(ag.id) || {};
+    agentsById.set(ag.id, {
+      id: ag.id,
+      role: ag.role || prev.role || 'Workflow Agent',
+      typeName: ag.typeName || prev.typeName || 'research',
+      spawnStepIndex: prev.spawnStepIndex || ag.spawnStepIndex || 0,
+      spawnTimeMs: prev.spawnTimeMs || ag.spawnTimeMs || 0,
+      workflowStepStatus: ag.workflowStepStatus || prev.workflowStepStatus || 0,
+      workflowDescription: ag.workflowDescription || prev.workflowDescription || '',
+      wfStatus: ag.wfStatus || prev.wfStatus || '',
+    });
+  };
+
+  // 1) 主数据源：父会话 SQLite steps (step_type=132, run_workflow) 实时渲染树，支持运行中实时发现
+  const dbAgents = readWorkflowSubagentsFromDb(mainConvId, { useCache: !force });
+  for (const ag of dbAgents) {
+    upsert(ag);
+  }
+
+  // 2) 兜底源 A：父会话 transcript.jsonl 同步 GENERIC 与异步 SYSTEM_MESSAGE 完成日志
+  if (parentIndex?.workflowSubagents instanceof Map) {
+    for (const ag of parentIndex.workflowSubagents.values()) {
+      upsert(ag);
+    }
+  }
+
+  // 3) 兜底源 B：run_workflow 后台任务日志文件 (.system_generated/tasks/task-*.log)
+  if (Array.isArray(parentIndex?.workflowTaskLogs)) {
+    for (const entry of parentIndex.workflowTaskLogs) {
+      if (!entry?.logFile || !fs.existsSync(entry.logFile)) continue;
+      try {
+        const txt = fs.readFileSync(entry.logFile, 'utf8');
+        const parsed = extractWorkflowAgentsFromText(txt, {
+          spawnStepIndex: entry.spawnStepIndex || 0,
+          spawnTimeMs: entry.spawnTimeMs || 0,
+          workflowDescription: entry.workflowDescription || '',
+        });
+        for (const ag of parsed) {
+          upsert(ag);
+        }
+      } catch {}
+    }
+  }
+
+  return { agentsById, totalWorkflowAgents: agentsById.size };
 }
 
 function getFullInvokeCalls(convId, force = false) {
@@ -145,6 +202,9 @@ export function evaluateSubagentLiveStatus({
 }) {
   const now = Date.now();
   const swarmKilled = Boolean(descriptor?.swarmMeta?.killed);
+  const workflowMeta = descriptor?.workflowMeta || null;
+  const wfStatus = String(workflowMeta?.wfStatus || '').toLowerCase();
+  const wfFailed = wfStatus === 'failed' || wfStatus === 'error' || wfStatus === 'cancelled' || wfStatus === 'canceled' || wfStatus === 'timeout';
   const descriptorKilled = descriptor?.state === 'SUBAGENT_STATE_KILLED' || swarmKilled;
   const parentDispatchMs = parentIndex?.dispatchesBySubId?.get(subId) || 0;
   const parentReplyMs = parentIndex?.repliesBySubId?.get(subId) || 0;
@@ -153,13 +213,25 @@ export function evaluateSubagentLiveStatus({
     parentIndex?.globalKillTimeMs || 0
   );
 
-  // 情况 1：子代理已被创建，但 transcript.jsonl 尚未刷盘落盘（刚被 invoke_subagent 唤起的前几秒）
+  // 情况 1：子代理已被创建，但 transcript.jsonl 尚未刷盘落盘（刚被 invoke_subagent / run_workflow 唤起的前几秒）
   if (!subStats || !subStats._lifecycle) {
     if (descriptorKilled) {
       return { status: 'STOPPED', statusDetail: swarmKilled ? '已移除' : '已终止' };
     }
+    if (wfFailed) {
+      const detail = wfStatus === 'timeout' ? '执行超时' : wfStatus.startsWith('cancel') ? '已取消' : '执行失败';
+      return { status: 'STOPPED', statusDetail: detail };
+    }
+    if (wfStatus === 'done') {
+      return { status: 'DONE', statusDetail: '已完成' };
+    }
     const spawnAnchorMs = descriptor?.mtimeMs || descriptor?.spawnTimeMs || 0;
-    if (spawnAnchorMs > 0 && now - spawnAnchorMs < 180_000 && parentKillMs <= spawnAnchorMs) {
+    if (
+      spawnAnchorMs > 0 &&
+      now - spawnAnchorMs < 180_000 &&
+      parentKillMs <= spawnAnchorMs &&
+      workflowMeta?.workflowStepStatus !== 3
+    ) {
       return { status: 'RUNNING', statusDetail: '启动初始化' };
     }
     return { status: 'STOPPED', statusDetail: '未就绪' };
@@ -179,10 +251,17 @@ export function evaluateSubagentLiveStatus({
     return { status: 'RUNNING', statusDetail: '处理新指令' };
   }
 
-  // 情况 3：当前执行周期已完整收尾且已向父代理交付汇报（免疫后续的清理 kill 或服务重启通知）
-  const hasRepliedInCurrentCycle = lc.repliedInCycle || parentReplyMs >= lc.cycleStartTimeMs;
+  // 情况 3：当前执行周期已完整收尾且已向父代理交付汇报（含 workflow finish 工具自然收尾，免疫后续清理通知）
+  const hasRepliedInCurrentCycle = lc.repliedInCycle || lc.finishedByTool || parentReplyMs >= lc.cycleStartTimeMs;
   if (lc.cycleState === 'TURN_CONCLUDED' && hasRepliedInCurrentCycle) {
     return { status: 'DONE', statusDetail: '已完成' };
+  }
+  if (wfStatus === 'done' && !wfFailed) {
+    return { status: 'DONE', statusDetail: '已完成' };
+  }
+  if (wfFailed && !lc.finishedByTool) {
+    const detail = wfStatus === 'timeout' ? '执行超时' : wfStatus.startsWith('cancel') ? '已取消' : '执行失败';
+    return { status: 'STOPPED', statusDetail: detail };
   }
   if (hasRepliedInCurrentCycle && lc.cycleState === 'AWAITING_MODEL' && now - lastActivityMs >= 15_000) {
     return { status: 'DONE', statusDetail: '已完成' };
@@ -274,7 +353,7 @@ export function evaluateSubagentLiveStatus({
 }
 
 /**
- * 解析单个子代理 / Swarm Worker 的 Role、TypeName 与真实运行模型信息
+ * 解析单个子代理 / Workflow Agent / Swarm Worker 的 Role、TypeName 与真实运行模型信息
  */
 function resolveSubagentMetadata({
   subId,
@@ -286,8 +365,17 @@ function resolveSubagentMetadata({
   force = false,
 }) {
   const swarmMeta = descriptor?.swarmMeta || null;
-  let role = descriptor?.role || (swarmMeta ? `Swarm Worker (${swarmMeta.memberName})` : 'Subagent Worker');
-  let typeName = descriptor?.typeName || (swarmMeta ? swarmMeta.swarmRole || 'worker' : 'subagent');
+  const workflowMeta = descriptor?.workflowMeta || null;
+  let role =
+    descriptor?.role ||
+    (swarmMeta
+      ? `Swarm Worker (${swarmMeta.memberName})`
+      : workflowMeta
+        ? workflowMeta.role || 'Workflow Agent'
+        : 'Subagent Worker');
+  let typeName =
+    descriptor?.typeName ||
+    (swarmMeta ? swarmMeta.swarmRole || 'worker' : workflowMeta ? workflowMeta.typeName || 'research' : 'subagent');
   let rawModel =
     swarmMeta?.model ||
     (swarmMeta?.memberName ? parentIndex?.swarmModelsByName?.get(swarmMeta.memberName) : '') ||
@@ -308,8 +396,8 @@ function resolveSubagentMetadata({
     return match || null;
   };
 
-  // 非 Swarm Worker 时优先从主会话 invoke_subagent 调用中反查参数
-  if (!swarmMeta && (!rawModel || rawModel === 'inherit' || role === 'Subagent Worker')) {
+  // 非 Swarm / Workflow 节点时优先从主会话 invoke_subagent 调用中反查参数
+  if (!swarmMeta && !workflowMeta && (!rawModel || rawModel === 'inherit' || role === 'Subagent Worker')) {
     let matched = tryMatchFromCalls(parentIndex?.invokeCalls || []);
     // 若 compact 日志因超长 Prompt 截断了 tool_calls，再按需回查 transcript_full.jsonl
     if (!matched || !matched.model) {
@@ -323,16 +411,17 @@ function resolveSubagentMetadata({
     }
   }
 
-  // 查询 SQLite 会话库中的实际推理模型展示名（同时覆盖 invoke_subagent 真实映射模型与 Swarm Worker 默认模型）
+  // 查询 SQLite 会话库中的实际推理模型展示名（同时覆盖 invoke_subagent、Workflow 与 Swarm Worker）
   const dbModelInfo = readConversationDbModel(subId);
   const resolvedDisplayName = dbModelInfo?.displayName || '';
+  const plannerModelFallback = subStats?._latestPlannerModelId || '';
 
-  // browser 子代理未显式传模型时平台默认使用 flash；Swarm Worker 若未指定具体模型且已从 DB 探明模型则直接使用实际模型
+  // browser 子代理未显式传模型时平台默认使用 flash；Swarm / Workflow 节点优先直接使用真实运行模型而非误标 inherit
   if (!rawModel) {
     if (typeName === 'browser') {
       rawModel = 'flash';
-    } else if (swarmMeta && resolvedDisplayName) {
-      rawModel = resolvedDisplayName;
+    } else if ((swarmMeta || workflowMeta) && (resolvedDisplayName || plannerModelFallback)) {
+      rawModel = resolvedDisplayName || plannerModelFallback;
     } else {
       rawModel = 'inherit';
     }
@@ -350,6 +439,8 @@ function resolveSubagentMetadata({
     isSwarm: Boolean(swarmMeta),
     swarmMemberName: swarmMeta?.memberName || '',
     workspaceMode: swarmMeta?.workspaceMode || '',
+    isWorkflow: Boolean(workflowMeta),
+    workflowDescription: workflowMeta?.workflowDescription || '',
     parentId: parentOwnerId,
   };
 }
@@ -368,8 +459,9 @@ export function getSubagentsForConversation(mainConvId, mainStats, { maxWindowOv
   };
   const mainModel = mainStats?.detectedModel || mainStats?.model || '';
 
-  // 合并权威描述符目录 (.system_generated/subagents)、Swarm 成员表 (.system_generated/swarm/members.json) 与主会话日志 UUID
+  // 合并权威描述符目录 (.system_generated/subagents)、Swarm 成员表、Dynamic Workflow (run_workflow) 节点与主会话日志 UUID
   const swarmCtx = readSwarmContext(mainConvId);
+  const workflowCtx = readWorkflowContext(mainConvId, parentIndex, force);
   const subagentsMap = new Map();
   const subDir = path.join(BRAIN_DIR, mainConvId, '.system_generated', 'subagents');
   if (fs.existsSync(subDir)) {
@@ -413,6 +505,30 @@ export function getSubagentsForConversation(mainConvId, mainStats, { maxWindowOv
         hasAuthoritativeDescriptor: true,
         swarmMeta: sm,
       });
+    }
+  }
+
+  for (const [sid, wm] of workflowCtx.agentsById.entries()) {
+    if (sid !== mainConvId) {
+      const existing = subagentsMap.get(sid);
+      if (existing) {
+        existing.workflowMeta = wm;
+        existing.hasAuthoritativeDescriptor = true;
+        if (!existing.spawnStepIndex && wm.spawnStepIndex) existing.spawnStepIndex = wm.spawnStepIndex;
+      } else {
+        subagentsMap.set(sid, {
+          id: sid,
+          role: wm.role || 'Workflow Agent',
+          typeName: wm.typeName || 'research',
+          model: '',
+          state: 'SUBAGENT_STATE_ALIVE',
+          spawnStepIndex: wm.spawnStepIndex || 0,
+          spawnTimeMs: wm.spawnTimeMs || 0,
+          mtimeMs: wm.spawnTimeMs || 0,
+          hasAuthoritativeDescriptor: true,
+          workflowMeta: wm,
+        });
+      }
     }
   }
 
@@ -462,6 +578,8 @@ export function getSubagentsForConversation(mainConvId, mainStats, { maxWindowOv
         isSwarm: resolved.isSwarm,
         swarmMemberName: resolved.swarmMemberName,
         workspaceMode: resolved.workspaceMode,
+        isWorkflow: resolved.isWorkflow,
+        workflowDescription: resolved.workflowDescription,
         spawnStepIndex: desc.spawnStepIndex || 0,
         steps: 0,
         turns: 0,
@@ -532,6 +650,8 @@ export function getSubagentsForConversation(mainConvId, mainStats, { maxWindowOv
       isSwarm: resolved.isSwarm,
       swarmMemberName: resolved.swarmMemberName,
       workspaceMode: resolved.workspaceMode,
+      isWorkflow: resolved.isWorkflow,
+      workflowDescription: resolved.workflowDescription,
       spawnStepIndex: desc.spawnStepIndex || 0,
       steps: subStats.steps,
       turns: subStats.turns,
@@ -541,6 +661,8 @@ export function getSubagentsForConversation(mainConvId, mainStats, { maxWindowOv
       tps: subStats.tps || subStats.tokPerSec || 0,
       medianTps: subStats.medianTps || subStats.recentTps || 0,
       recentTps: subStats.recentTps || 0,
+      peakTps: subStats.peakTps || subStats.tps || 0,
+      sessionAvgTps: subStats.sessionAvgTps || subStats.tps || 0,
       e2eTps: subStats.e2eTps || 0,
       ttft: subStats.ttft || 0,
       recentTtft: subStats.recentTtft || 0,
